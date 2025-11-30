@@ -177,6 +177,7 @@ class FileHandler:
             "research_questions": blog_dir / "research" / "research_questions.yaml",
             "search_results": blog_dir / "research" / "search_results.yaml",
             "extracted_content": blog_dir / "research" / "extracted_content.yaml",
+            "outline": blog_dir / "research" / "outline.yaml",
             "draft": blog_dir / "drafts" / f"{safe_name}.md",
             "final_md": blog_dir / "final" / f"{safe_name}.md",
             "final_html": blog_dir / "final" / f"{safe_name}.html",
@@ -291,6 +292,25 @@ class FileHandler:
         logger.info(
             f"Saved extracted content ({successful}/{total} successful) to {file_path}"
         )
+
+    @staticmethod
+    def save_outline(
+        file_path: Path,
+        outline_data: dict[str, Any],
+    ) -> None:
+        """
+        Save blog outline to YAML file.
+
+        Args:
+            file_path: Path to save the YAML file
+            outline_data: Outline data dict
+        """
+        # Add timestamp if not present
+        if "generated_at" not in outline_data:
+            outline_data["generated_at"] = datetime.now().isoformat()
+            
+        FileHandler.write_yaml(file_path, outline_data)
+        logger.info(f"Saved blog outline to {file_path}")
 
     @staticmethod
     def save_blog_output(

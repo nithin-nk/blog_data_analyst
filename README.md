@@ -215,3 +215,5 @@ mypy src/
 ✅ Example YAML inputs  
 
 **Status**: Phase 0 Complete - Ready for Phase 1 implementation. See `plan.md` for next steps.
+
+python -m src.main research --topic "Memory for AI agents using mem0" --context "Focus on Python implementation" --extraction-concurrency 5 --extraction-timeout 30

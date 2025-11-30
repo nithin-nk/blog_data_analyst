@@ -24,6 +24,7 @@ from rich.table import Table
 
 from src.config.settings import get_settings
 from src.planning.question_generator import QuestionGenerator
+from src.planning.outline_generator import OutlineGenerator
 from src.research.search_agent import SearchAgent
 from src.research.content_extractor import ContentExtractor
 from src.utils.file_handler import FileHandler
@@ -278,11 +279,43 @@ async def run_research_pipeline(
         extracted_content = None
         console.print("\n[yellow]⚠[/yellow] No URLs to extract content from")
 
+    # Step 3.2: Generate Outline
+    if extracted_content and extracted_content.contents:
+        console.print("\n[bold cyan]Generating blog outline...[/bold cyan]")
+        outline_generator = OutlineGenerator(model_name="gemini-2.0-flash")
+        outline = await outline_generator.generate(topic, extracted_content)
+        
+        # Display outline summary
+        console.print(f"\n[green]✓[/green] Generated outline with {len(outline.sections)} sections")
+        console.print(f"   Target Audience: {outline.metadata.target_audience}")
+        console.print(f"   Difficulty: {outline.metadata.difficulty}")
+        
+        table = Table(title="Blog Outline", show_lines=True)
+        table.add_column("#", style="dim", width=3)
+        table.add_column("Section", style="cyan")
+        table.add_column("Summary", style="dim")
+        
+        for i, section in enumerate(outline.sections, 1):
+            table.add_row(str(i), section.heading, section.summary[:100] + "...")
+            
+        console.print(table)
+        
+        # Save outline
+        FileHandler.save_outline(
+            file_path=paths["outline"],
+            outline_data=outline.model_dump(),
+        )
+    else:
+        outline = None
+        console.print("\n[yellow]⚠[/yellow] Skipping outline generation (no content)")
+
     return {
         "paths": paths,
         "questions": questions_result,
         "search_results": search_results,
+        "search_results": search_results,
         "extracted_content": extracted_content,
+        "outline": outline,
     }
 
 
@@ -390,7 +423,8 @@ def research(
             f"[green]Research complete![/green]\n\n"
             f"Questions: {len(result['questions'].questions)}\n"
             f"Unique URLs: {len(result['search_results'].all_urls)}\n"
-            f"{extracted_info}\n"
+            f"{extracted_info}"
+            f"Outline: {len(result['outline'].sections) if result.get('outline') else 0} sections\n\n"
             f"Output directory: {result['paths']['blog_dir']}",
             title="✅ Success",
             border_style="green",
