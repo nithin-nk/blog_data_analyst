@@ -182,37 +182,34 @@ blog_data_analyst/
 
 ## **Phase 3: Outline Generation & Review** 📝 NEW
 
-### Step 3.1: Subtopic Analyzer
-**File**: `src/planning/outline_generator.py`
-- Analyze all extracted content to identify:
-  - Key subtopics and themes
-  - Technical concepts that need explanation
-  - Areas where code examples would help
-  - Concepts that benefit from visual diagrams
-- Use LLM to synthesize findings
-- **Test**: Mock content, verify theme extraction
-
 ### Step 3.2: Outline Generator
-**File**: `src/planning/outline_generator.py` (method)
-- Generate structured blog outline from analysis:
+**File**: `src/planning/outline_generator.py`
+- Pass generated titles, snippets, headings, and source queries to the LLM.
+- LLM generates a structured blog outline with:
+  - Subheadings for each section
+  - Summary of what each section should contain
+  - Reference links for each section (from research data)
+- Output YAML example:
   ```yaml
   topic: "How to build memory for AI agents using mem0"
   outline:
-    - "What is memory for AI agents?"
-    - "Why AI agents need memory with an example?"
-    - "Mermaid: Architecture of mem0 memory system"
-    - "Code: Implementing custom memory extraction"
-    - ...
+    - heading: "What is memory for AI agents?"
+      summary: "Explain the concept of memory in AI agents, why it's important, and provide real-world context."
+      references:
+        - "https://example.com/article1"
+        - "https://example.com/article2"
+    - heading: "Architecture of mem0 memory system"
+      summary: "Describe the architecture using diagrams and code snippets."
+      references:
+        - "https://example.com/diagram"
+    ...
   metadata:
     target_audience: "AI developers"
     difficulty: "Intermediate"
     estimated_reading_time: "15 minutes"
   ```
-- LLM decides where to place `Code:` and `Mermaid:` markers based on:
-  - Content containing code snippets → suggest Code
-  - Content about architecture/workflow/process → suggest Mermaid
 - Ensure logical flow: Introduction → Core concepts → Implementation → Conclusion
-- **Test**: Verify outline structure, marker placement logic
+- **Test**: Verify outline structure, reference inclusion, summary quality
 
 ### Step 3.3: Outline Quality Reviewer
 **File**: `src/planning/outline_reviewer.py`
