@@ -20,32 +20,32 @@ logger = get_logger(__name__)
 
 
 class OutlineReview(BaseModel):
-    """Review result for a blog outline."""
+    """Review result for a blog outline based on E-E-A-T principles."""
 
     score: float = Field(description="Overall quality score from 0.0-10.0", ge=0.0, le=10.0)
     completeness_score: float = Field(
-        description="Does it cover the topic thoroughly? (0.0-10.0)", ge=0.0, le=10.0
+        description="Does it cover the topic thoroughly with E-E-A-T elements (experience, expertise)? (0.0-10.0)", ge=0.0, le=10.0
     )
     logical_flow_score: float = Field(
-        description="Is the section order sensible? (0.0-10.0)", ge=0.0, le=10.0
+        description="Is the section order sensible with clear structure? (0.0-10.0)", ge=0.0, le=10.0
     )
     depth_score: float = Field(
-        description="Are subtopics specific enough? (0.0-10.0)", ge=0.0, le=10.0
+        description="Are subtopics specific with original insights beyond obvious information? (0.0-10.0)", ge=0.0, le=10.0
     )
     balance_score: float = Field(
-        description="Good mix of theory, code, visuals? (0.0-10.0)", ge=0.0, le=10.0
+        description="Good mix of theory, code, visuals, and actionable content? (0.0-10.0)", ge=0.0, le=10.0
     )
     audience_fit_score: float = Field(
-        description="Appropriate for target audience? (0.0-10.0)", ge=0.0, le=10.0
+        description="Appropriate for target audience with people-first approach? (0.0-10.0)", ge=0.0, le=10.0
     )
     strengths: list[str] = Field(
-        description="Key strengths of the outline (2-3 points)"
+        description="Key strengths of the outline including E-E-A-T elements (2-3 points)"
     )
     weaknesses: list[str] = Field(
-        description="Areas that need improvement (2-3 points)"
+        description="Areas that need improvement including E-E-A-T gaps (2-3 points)"
     )
     specific_feedback: str = Field(
-        description="Detailed, actionable feedback for improving the outline"
+        description="Detailed, actionable feedback for improving the outline with E-E-A-T focus"
     )
 
 
@@ -55,52 +55,76 @@ class OutlineReviewer:
     """
 
     SYSTEM_PROMPT = """
-You are an expert technical content reviewer and editor.
+You are an expert technical content reviewer and editor evaluating blog outlines based on Google's Search Quality Guidelines and E-E-A-T principles.
 
 Your task is to CRITICALLY EVALUATE a blog post outline and provide HONEST, ACTIONABLE feedback.
 
-EVALUATION CRITERIA (Score each 1-10):
+EVALUATION CRITERIA (Score each 0.0-10.0):
 
-1. **Completeness** (1-10):
+1. **Completeness & E-E-A-T Alignment** (0.0-10.0):
    - Does the outline cover all essential aspects of the topic?
    - Are there obvious gaps or missing sections?
    - Does it address common questions readers would have?
+   - **E-E-A-T**: Does the outline plan demonstrate:
+     * First-hand experience (practical examples, case studies)?
+     * Deep expertise (technical depth, evidence-based claims)?
+     * Authoritative sources and references?
+     * Trustworthy, factual information?
+   - Will readers feel they've learned enough to achieve their goals?
+   - Is this outline for people-first content, not search-engine-first?
 
-2. **Logical Flow** (1-10):
+2. **Logical Flow & Structure** (0.0-10.0):
    - Does the section order make sense?
    - Does each section build on previous ones?
    - Is there a clear progression from introduction to conclusion?
+   - Are headings descriptive and not clickbait?
+   - Does the structure facilitate easy scanning and readability?
 
-3. **Depth** (1-10):
+3. **Depth & Originality** (0.0-10.0):
    - Are section descriptions specific and detailed?
    - Do summaries clearly explain WHAT and WHY?
    - Are code/diagram instructions concrete?
+   - Does the outline promise original insights beyond obvious information?
+   - Will content add substantial value vs. just rehashing existing sources?
+   - Does it avoid promising answers to unanswerable questions?
 
-4. **Balance** (1-10):
+4. **Balance & Content Mix** (0.0-10.0):
    - Good mix of conceptual explanations and practical examples?
    - Appropriate amount of code examples and diagrams?
    - Sections are roughly balanced in size/scope?
+   - Does it include actionable, useful information for readers?
+   - Balance between theory and hands-on guidance?
 
-5. **Audience Fit** (1-10):
+5. **Audience Fit & Value** (0.0-10.0):
    - Is the difficulty level appropriate for the target audience?
    - Is the technical depth suitable?
-   - Will the target audience find this useful?
+   - Will the target audience find this useful if they came directly to the site?
+   - Does it appear designed for an existing audience vs. just search traffic?
+   - Would readers bookmark, share, or recommend this content?
+   - Is this the kind of outline you'd expect in a printed magazine or encyclopedia?
 
 SCORING GUIDELINES (Use decimal precision for nuanced evaluation):
-- 9.0-10.0: Exceptional, publication-ready
-- 7.5-8.9: Good, minor improvements needed
-- 6.0-7.4: Acceptable, but significant improvements needed
+- 9.0-10.0: Exceptional, demonstrates strong E-E-A-T planning, publication-ready
+- 7.5-8.9: Good with minor improvements needed
+- 6.0-7.4: Acceptable but needs significant improvements (lacking E-E-A-T or depth)
 - 4.0-5.9: Poor, major rework required
-- 0.0-3.9: Fundamentally flawed
+- 0.0-3.9: Fundamentally flawed, appears search-engine-first
 
-BE CRITICAL: If the outline has issues, score it lower. Don't inflate scores.
+**BE CRITICAL**: If the outline has issues, score it lower. Don't inflate scores.
 Use decimal scores (e.g., 8.5, 7.2) to provide nuanced feedback.
 
+**CRITICAL E-E-A-T REQUIREMENTS**:
+- If outline lacks evidence of first-hand experience/expertise, score Completeness < 7.0
+- If outline appears designed for search engines rather than people, score < 6.0
+- If sections are too generic or lack specificity, score Depth < 7.0
+- If outline doesn't plan for substantial original value, score Depth < 7.0
+
 FEEDBACK REQUIREMENTS:
-- Identify 2-3 key strengths
-- Identify 2-3 key weaknesses
+- Identify 2-3 key strengths (especially E-E-A-T elements)
+- Identify 2-3 key weaknesses (especially E-E-A-T gaps)
 - Provide specific, actionable improvement suggestions
 - If score < 8, your feedback will be used to regenerate the outline
+- Explicitly mention E-E-A-T aspects in your feedback
 
 OUTPUT:
 Generate a structured JSON response matching the `OutlineReview` schema.

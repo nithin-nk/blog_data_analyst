@@ -16,10 +16,10 @@ logger = get_logger(__name__)
 class SectionReview(BaseModel):
     """Structured output model for section content review."""
     score: float = Field(
-        description="Quality score from 1-10, where 10 is perfect. Consider: Quality (35%), Conciseness (35%), Structure (10%), Readability (10%), SEO (10%)"
+        description="Quality score from 1-10, where 10 is perfect. Consider: Style Compliance (25%), E-E-A-T & People-First Content (35%), Content Quality & Completeness (25%), Structure & Readability (10%), SEO & Discoverability (5%)"
     )
     feedback: str = Field(
-        description="Detailed, actionable feedback on what needs improvement, especially regarding quality and conciseness. Use bullet points."
+        description="Detailed, actionable feedback on what needs improvement. Focus on E-E-A-T (Experience, Expertise, Authoritativeness, Trustworthiness), people-first content, conciseness, and style. Use bullet points."
     )
 
 
@@ -176,7 +176,7 @@ Generate the content now.
             Dict with 'score' (float) and 'feedback' (str)
         """
         prompt = f"""
-You are an expert content reviewer evaluating a blog section for quality and style.
+You are an expert content reviewer evaluating a blog section for quality and style based on Google's Search Quality Guidelines and E-E-A-T principles.
 
 Blog Title: {topic}
 Section Heading: {heading}
@@ -184,32 +184,57 @@ Section Heading: {heading}
 CONTENT TO REVIEW:
 {content}
 
-EVALUATION CRITERIA (Prioritize Short Sentences and Bullet Points):
+EVALUATION CRITERIA:
 
-1.  **STYLE COMPLIANCE (Weight: 40%)**:
-    *   Are sentences SHORT and SPECIFIC?
-    *   Are BULLET POINTS used effectively?
-    *   Does it avoid long, complex paragraphs?
-    *   Does it match this style:
-        ```
-        Why Deploying AI Agents Is Hard
-        Agent frameworks differ widely in required infrastructure.
-        Latency varies from milliseconds to minutes.
-        ```
+1. **STYLE COMPLIANCE (Weight: 25%)**:
+   * Are sentences SHORT and SPECIFIC?
+   * Are BULLET POINTS used effectively?
+   * Does it avoid long, complex paragraphs?
+   * Does it match the concise style:
+     ```
+     Why Deploying AI Agents Is Hard
+     Agent frameworks differ widely in required infrastructure.
+     Latency varies from milliseconds to minutes.
+     ```
 
-2.  **QUALITY (Weight: 30%)**:
-    *   Is the content accurate and valuable?
-    *   Does it provide actionable info?
+2. **E-E-A-T & PEOPLE-FIRST CONTENT (Weight: 35%)**:
+   * **Experience**: Does it demonstrate first-hand expertise or practical knowledge?
+   * **Expertise**: Is the depth of knowledge evident? Are claims backed by evidence?
+   * **Authoritativeness**: Would this be referenced in a magazine or encyclopedia?
+   * **Trustworthiness**: Are sources clear? No easily-verified factual errors?
+   * **People-First**: Is this useful for readers coming directly, not just for search engines?
+   * Does it provide original information, analysis, or insights beyond the obvious?
+   * Would readers leave feeling they've learned enough to achieve their goal?
 
-3.  **STRUCTURE & READABILITY (Weight: 20%)**:
-    *   Clear flow?
-    *   Easy to scan?
+3. **CONTENT QUALITY & COMPLETENESS (Weight: 25%)**:
+   * Does it provide substantial, complete description of the topic?
+   * Is the content accurate, valuable, and actionable?
+   * Does the heading provide a descriptive, helpful summary (not clickbait)?
+   * Does it avoid simply copying other sources? Does it add substantial value?
+   * Is this content you'd bookmark, share, or recommend?
 
-4.  **SEO (Weight: 10%)**:
-    *   Natural keyword usage?
+4. **STRUCTURE & READABILITY (Weight: 10%)**:
+   * Clear logical flow and easy to scan?
+   * No spelling or stylistic issues?
+   * Well-produced, not sloppy or hastily made?
+
+5. **SEO & DISCOVERABILITY (Weight: 5%)**:
+   * Natural keyword usage without keyword stuffing?
+   * Does it answer the topic clearly and completely?
+
+SCORING GUIDELINES:
+* 9-10: Exceptional, demonstrates strong E-E-A-T, publication-ready
+* 7-8: Good quality with minor improvements needed
+* 5-6: Acceptable but needs significant improvements (lacking E-E-A-T or conciseness)
+* 3-4: Poor, major rework required
+* 1-2: Fundamentally flawed
 
 Provide a score (1-10) and specific, actionable feedback.
-**CRITICAL**: If the content uses long sentences or lacks bullet points, give a LOW score (< 7) and explicitly ask for shorter sentences and more bullet points in the feedback.
+**CRITICAL**: 
+- If content lacks first-hand experience/expertise evidence, score below 7
+- If content uses long sentences or lacks bullet points, score below 7
+- If content appears to be search-engine-first rather than people-first, score below 6
+- Explicitly mention what needs improvement in your feedback
 """
         
         # Use gemini_llm_call with structured output
@@ -363,11 +388,11 @@ Provide a score (1-10) and specific, actionable feedback.
             
             # Rate limit wait (except for the last one)
             if i < total_sections - 1:
-                msg = "Waiting 20 seconds to respect rate limits..."
+                msg = "Waiting 5 seconds to respect rate limits..."
                 logger.info(msg)
                 if progress_callback:
                     progress_callback(msg)
-                time.sleep(20)
+                time.sleep(5)
                 
         return full_content
 
