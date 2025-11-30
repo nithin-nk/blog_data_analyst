@@ -25,6 +25,7 @@ from rich.table import Table
 from src.config.settings import get_settings
 from src.planning.question_generator import QuestionGenerator
 from src.planning.outline_generator import OutlineGenerator
+from src.planning.outline_reviewer import OutlineReviewer
 from src.research.search_agent import SearchAgent
 from src.research.content_extractor import ContentExtractor
 from src.utils.file_handler import FileHandler
@@ -279,18 +280,63 @@ async def run_research_pipeline(
         extracted_content = None
         console.print("\n[yellow]⚠[/yellow] No URLs to extract content from")
 
-    # Step 3.2: Generate Outline
+    # Step 3.2 + 3.3: Generate and Review Outline
     if extracted_content and extracted_content.contents:
-        console.print("\n[bold cyan]Generating blog outline...[/bold cyan]")
-        outline_generator = OutlineGenerator(model_name="gemini-2.0-flash")
-        outline = await outline_generator.generate(topic, extracted_content)
+        console.print("\n[bold cyan]Generating and reviewing blog outline...[/bold cyan]")
+        settings = get_settings()
         
-        # Display outline summary
-        console.print(f"\n[green]✓[/green] Generated outline with {len(outline.sections)} sections")
+        outline_generator = OutlineGenerator(model_name="gemini-2.0-flash")
+        outline_reviewer = OutlineReviewer(model_name=settings.outline_reviewer_model)
+        
+        # Generate initial outline
+        console.print("[dim]Generating initial outline...[/dim]")
+        outline = await outline_generator.generate(topic, extracted_content)
+        reviews = []
+        
+        # Review and iterate until quality threshold met
+        max_iterations = settings.max_outline_iterations
+        quality_threshold = settings.outline_quality_threshold
+        
+        for iteration in range(1, max_iterations + 1):
+            console.print(f"\n[bold cyan]━━━ Iteration {iteration}/{max_iterations} ━━━[/bold cyan]")
+            
+            # Review current outline
+            console.print("[dim]Reviewing outline quality...[/dim]")
+            review = await outline_reviewer.review(outline)
+            reviews.append(review)
+            
+            # Display review feedback
+            outline_reviewer.display_review(review, iteration, console)
+            
+            if review.score >= quality_threshold:
+                console.print(f"[green]✓ Outline approved! Score: {review.score:.1f}/{quality_threshold}[/green]")
+                break
+            
+            # If not last iteration, regenerate with feedback
+            if iteration < max_iterations:
+                console.print(
+                    f"[yellow]Score {review.score:.1f} < {quality_threshold}. Regenerating with feedback...[/yellow]"
+                )
+                outline = await outline_reviewer._regenerate_with_feedback(
+                    topic, extracted_content, outline_generator, review
+                )
+            else:
+                console.print(
+                    f"[yellow]⚠ Max iterations reached. Final score: {review.score:.1f}/{quality_threshold}[/yellow]"
+                )
+        
+        # Save all reviews to YAML
+        await outline_reviewer.save_reviews(reviews, paths["outline_reviews"])
+        console.print(f"[green]✓[/green] Saved {len(reviews)} review(s) to: {paths['outline_reviews']}")
+        
+        # Display final summary
+        console.print(f"\n[green]✓[/green] Outline finalized after {len(reviews)} iteration(s)")
+        console.print(f"   Final Score: {reviews[-1].score:.1f}/{settings.outline_quality_threshold}")
         console.print(f"   Target Audience: {outline.metadata.target_audience}")
         console.print(f"   Difficulty: {outline.metadata.difficulty}")
         
-        table = Table(title="Blog Outline", show_lines=True)
+        # Display outline structure
+        table = Table(title="Final Blog Outline", show_lines=True)
         table.add_column("#", style="dim", width=3)
         table.add_column("Section", style="cyan")
         table.add_column("Summary", style="dim")
@@ -300,11 +346,21 @@ async def run_research_pipeline(
             
         console.print(table)
         
-        # Save outline
+        # Save outline to research directory
         FileHandler.save_outline(
             file_path=paths["outline"],
             outline_data=outline.model_dump(),
         )
+        console.print(f"[green]✓[/green] Saved outline to: {paths['outline']}")
+        
+        # Save approved outline to inputs directory for human review
+        approved_path = FileHandler.save_approved_outline(
+            topic=topic,
+            outline_data=outline.model_dump(),
+            input_dir=settings.input_dir,
+        )
+        console.print(f"[green]✓[/green] Saved approved outline to: {approved_path}")
+        
     else:
         outline = None
         console.print("\n[yellow]⚠[/yellow] Skipping outline generation (no content)")
@@ -313,9 +369,9 @@ async def run_research_pipeline(
         "paths": paths,
         "questions": questions_result,
         "search_results": search_results,
-        "search_results": search_results,
         "extracted_content": extracted_content,
         "outline": outline,
+        "final_score": reviews[-1].score if (extracted_content and extracted_content.contents and outline) else None,
     }
 
 
@@ -419,13 +475,28 @@ def research(
             stats = result["extracted_content"].statistics
             extracted_info = f"Extracted Content: {stats.get('successful', 0)}/{stats.get('total_urls', 0)} successful\n"
         
+        outline_info = ""
+        next_command = ""
+        if result.get("outline"):
+            outline_info = f"Outline: {len(result['outline'].sections)} sections (Score: {result.get('final_score', 'N/A')}/10)\n"
+            
+            # Generate next command
+            settings = get_settings()
+            topic_slug = FileHandler.slugify(topic)
+            approved_file = settings.input_dir / f"{topic_slug}.yaml"
+            next_command = f"\n[bold cyan]Next Steps:[/bold cyan]\n"
+            next_command += f"1. Review the outline at: [yellow]{approved_file}[/yellow]\n"
+            next_command += f"2. Edit if needed, then run:\n"
+            next_command += f"   [green]python -m src.main generate --input {approved_file}[/green]"
+        
         console.print(Panel(
             f"[green]Research complete![/green]\n\n"
             f"Questions: {len(result['questions'].questions)}\n"
             f"Unique URLs: {len(result['search_results'].all_urls)}\n"
             f"{extracted_info}"
-            f"Outline: {len(result['outline'].sections) if result.get('outline') else 0} sections\n\n"
-            f"Output directory: {result['paths']['blog_dir']}",
+            f"{outline_info}\n"
+            f"Output directory: {result['paths']['blog_dir']}\n"
+            f"{next_command}",
             title="✅ Success",
             border_style="green",
         ))

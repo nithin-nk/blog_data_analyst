@@ -178,6 +178,7 @@ class FileHandler:
             "search_results": blog_dir / "research" / "search_results.yaml",
             "extracted_content": blog_dir / "research" / "extracted_content.yaml",
             "outline": blog_dir / "research" / "outline.yaml",
+            "outline_reviews": blog_dir / "research" / "outline_reviews.yaml",
             "draft": blog_dir / "drafts" / f"{safe_name}.md",
             "final_md": blog_dir / "final" / f"{safe_name}.md",
             "final_html": blog_dir / "final" / f"{safe_name}.html",
@@ -311,6 +312,35 @@ class FileHandler:
             
         FileHandler.write_yaml(file_path, outline_data)
         logger.info(f"Saved blog outline to {file_path}")
+
+    @staticmethod
+    def save_approved_outline(
+        topic: str,
+        outline_data: dict[str, Any],
+        input_dir: Path,
+    ) -> Path:
+        """
+        Save approved blog outline to inputs directory for human review.
+
+        Args:
+            topic: Blog topic
+            outline_data: Outline data dict
+            input_dir: Inputs directory path
+
+        Returns:
+            Path to saved file
+        """
+        safe_name = FileHandler.slugify(topic)
+        file_path = input_dir / f"{safe_name}.yaml"
+        
+        # Add timestamp if not present
+        if "generated_at" not in outline_data:
+            outline_data["generated_at"] = datetime.now().isoformat()
+            
+        FileHandler.write_yaml(file_path, outline_data)
+        logger.info(f"Saved approved outline to {file_path}")
+        return file_path
+
 
     @staticmethod
     def save_blog_output(

@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # Content Generation Settings
     max_refinement_iterations: int = 3
     quality_threshold: int = 8
+    max_outline_iterations: int = 3
+    outline_quality_threshold: float = 9.5
+    outline_reviewer_model: str = "gemini-2.5-flash"
     
     # File Paths
     input_dir: Path = Path("inputs")

@@ -212,7 +212,8 @@ Generate a structured JSON/YAML response matching the `BlogOutline` schema. Ensu
     async def generate(
         self,
         topic: str,
-        research_data: AggregatedExtractedContent
+        research_data: AggregatedExtractedContent,
+        feedback: Optional[dict] = None,
     ) -> BlogOutline:
         """
         Generate a blog outline based on research data.
@@ -220,6 +221,7 @@ Generate a structured JSON/YAML response matching the `BlogOutline` schema. Ensu
         Args:
             topic: Blog topic
             research_data: Extracted content from research phase
+            feedback: Optional feedback from previous iteration review
 
         Returns:
             BlogOutline structured object
@@ -229,6 +231,33 @@ Generate a structured JSON/YAML response matching the `BlogOutline` schema. Ensu
         research_summary = self._format_research_data(research_data)
         
         prompt = f"Generate a detailed blog post outline for the topic: '{topic}'\n\n"
+        
+        # Add feedback from previous iteration if provided
+        if feedback:
+            prompt += "=" * 50 + "\n"
+            prompt += "PREVIOUS ITERATION FEEDBACK:\n"
+            prompt += "=" * 50 + "\n\n"
+            prompt += f"Previous Score: {feedback.get('score', 'N/A')}/10.0\n\n"
+            
+            if feedback.get('strengths'):
+                prompt += "Strengths (keep these):\n"
+                for strength in feedback['strengths']:
+                    prompt += f"  ✓ {strength}\n"
+                prompt += "\n"
+            
+            if feedback.get('weaknesses'):
+                prompt += "Weaknesses (address these):\n"
+                for weakness in feedback['weaknesses']:
+                    prompt += f"  ✗ {weakness}\n"
+                prompt += "\n"
+            
+            if feedback.get('specific_feedback'):
+                prompt += "Specific Improvements Needed:\n"
+                prompt += f"{feedback['specific_feedback']}\n\n"
+            
+            prompt += "Please generate an IMPROVED outline that addresses the weaknesses while maintaining the strengths.\n\n"
+            prompt += "=" * 50 + "\n\n"
+        
         prompt += "Based on the following research data:\n\n"
         prompt += research_summary
         
@@ -248,7 +277,8 @@ Generate a structured JSON/YAML response matching the `BlogOutline` schema. Ensu
     def generate_sync(
         self,
         topic: str,
-        research_data: AggregatedExtractedContent
+        research_data: AggregatedExtractedContent,
+        feedback: Optional[dict] = None,
     ) -> BlogOutline:
         """
         Synchronous wrapper for generate().
@@ -256,8 +286,9 @@ Generate a structured JSON/YAML response matching the `BlogOutline` schema. Ensu
         Args:
             topic: Blog topic
             research_data: Extracted content from research phase
+            feedback: Optional feedback from previous iteration review
 
         Returns:
             BlogOutline structured object
         """
-        return asyncio.run(self.generate(topic, research_data))
+        return asyncio.run(self.generate(topic, research_data, feedback))
