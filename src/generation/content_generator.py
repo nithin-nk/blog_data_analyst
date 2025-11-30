@@ -89,18 +89,27 @@ Research Content (from top references):
 Context from previous sections:
 {previous_context if previous_context else "This is the first section."}
 
-CRITICAL REQUIREMENTS:
+CRITICAL REQUIREMENTS FOR REVISION:
 
-1. REVISE the existing content based on the feedback above, focusing especially on QUALITY and CONCISENESS.
+1.  **ADDRESS FEEDBACK**: Incorporate the review feedback.
+2.  **STRICT STYLE ADHERENCE**:
+    *   **Short Sentences**: Use less words. Be specific.
+    *   **Bullet Points**: Use them liberally.
+    *   **Example Style**:
+        ```
+        Why Deploying AI Agents Is Hard
+        Agent frameworks differ widely in required infrastructure.
 
-2. MAINTAIN the structure and flow while addressing all feedback points.
+        Latency varies from milliseconds to minutes.
 
-3. Keep all the other requirements below:
+        Real-time streaming is needed for modern AI UX.
+        ```
+3.  **NO CONVERSATIONAL FILLER**: Output ONLY the blog section content.
 """
         else:
             # Initial generation mode
             prompt = f"""
-You are an expert technical blog writer. You are writing a section for a blog post titled "{topic}".
+You are an expert technical blog writer. Write a section for a blog post titled "{topic}".
 
 Current Subtopic: {heading}
 Subtopic Summary: {summary}
@@ -111,29 +120,46 @@ Research Content (from top references):
 Context from previous sections:
 {previous_context if previous_context else "This is the first section."}
 
+WRITING STYLE - STRICTLY FOLLOW THIS FORMAT:
+
+1.  **Short Sentences**: Use less words. Be specific. Avoid long, complex sentences.
+2.  **Bullet Points**: Use bullet points liberally for lists, steps, and key facts.
+3.  **Directness**: Get straight to the point. No fluff.
+
+EXAMPLE STYLE (Follow this pattern):
+```
+This blog post explains how to design a production-ready, open-source architecture for AI agents using FastAPI, Celery, Redis, Kubernetes, KEDA, Prometheus, Grafana, LangFuse, and LangGraph.
+
+Why Deploying AI Agents Is Hard
+Agent frameworks differ widely in required infrastructure.
+
+Latency varies from milliseconds to minutes depending on workflow complexity.
+
+Real-time streaming is needed for modern AI UX.
+
+REST-only patterns can’t handle long execution, retries, or async scheduling.
+
+Scaling compute-heavy agents is fundamentally different from scaling API servers.
+```
+
 CRITICAL REQUIREMENTS:
 
-1. CONCISENESS: Write concise, to-the-point content for this subtopic only. This is ONE subsection of the blog, not the entire article.
+1.  **NO CONVERSATIONAL FILLER**: Output ONLY the blog section content.
+2.  **CONCISENESS**:
+    *   Short paragraphs (1-2 sentences).
+    *   Specific details.
+3.  **FORMATTING**:
+    *   Use `###` for sub-sections.
+    *   Use bullet points.
+4.  **CODE & DIAGRAMS**:
+    *   Include relevant code snippets (```python, etc.).
+    *   Use Mermaid diagrams where appropriate.
+5.  **LINKS**:
+    *   Max 2 relevant links per section from provided research.
+6.  **SCOPE**:
+    *   Focus ONLY on this subtopic.
 
-2. FORMATTING: Use bullet points liberally to improve readability. Avoid long, dense paragraphs. Break complex ideas into digestible points.
-
-3. REFERENCES: Include relevant links to the provided references (MAXIMUM 2 links per section). Format: [descriptive text](URL). Only link to URLs from the research content provided above.
-
-4. FLOW & COHESION: Ensure smooth transitions from the previous sections. The content must feel like a natural continuation of the blog, maintaining a cohesive narrative throughout.
-
-5. SEO OPTIMIZATION: Use relevant keywords naturally. Include the main topic and subtopic keywords where appropriate without keyword stuffing.
-
-6. CODE SNIPPETS: If the subtopic involves technical implementation or examples, generate well-commented code snippets using triple backticks with language specification (e.g., ```python, ```javascript, etc.).
-
-7. DIAGRAMS: If the subtopic involves processes, workflows, or system architecture, create Mermaid diagrams using triple backticks (e.g., ```mermaid). Use flowcharts, sequence diagrams, or other appropriate diagram types.
-
-8. ACCESSIBILITY: Write in simple, clear language that anyone can understand, regardless of their technical background. Explain jargon when necessary.
-
-9. CONTEXT ACCURACY: Base ALL content strictly on the provided research context above. Do not invent facts or add information not supported by the research.
-
-10. SCOPE CONTROL: Remember this is just ONE subsection. Keep it focused and appropriately sized - not too long, not too short. Do not write conclusions for the entire blog post.
-
-Generate the content for this section now.
+Generate the content now.
 """
         messages = [HumanMessage(content=prompt)]
         return gemini_llm_call(messages, model_name="gemini-2.5-flash", settings=self.settings)
@@ -150,7 +176,7 @@ Generate the content for this section now.
             Dict with 'score' (float) and 'feedback' (str)
         """
         prompt = f"""
-You are an expert content reviewer evaluating a blog section for quality.
+You are an expert content reviewer evaluating a blog section for quality and style.
 
 Blog Title: {topic}
 Section Heading: {heading}
@@ -158,19 +184,32 @@ Section Heading: {heading}
 CONTENT TO REVIEW:
 {content}
 
-EVALUATION CRITERIA (prioritize quality and conciseness):
+EVALUATION CRITERIA (Prioritize Short Sentences and Bullet Points):
 
-1. **QUALITY (Weight: 35%)**: Is the content accurate, insightful, and valuable? Does it provide actionable information?
+1.  **STYLE COMPLIANCE (Weight: 40%)**:
+    *   Are sentences SHORT and SPECIFIC?
+    *   Are BULLET POINTS used effectively?
+    *   Does it avoid long, complex paragraphs?
+    *   Does it match this style:
+        ```
+        Why Deploying AI Agents Is Hard
+        Agent frameworks differ widely in required infrastructure.
+        Latency varies from milliseconds to minutes.
+        ```
 
-2. **CONCISENESS (Weight: 35%)**: Is the content concise and to-the-point? No unnecessary verbosity or repetition?
+2.  **QUALITY (Weight: 30%)**:
+    *   Is the content accurate and valuable?
+    *   Does it provide actionable info?
 
-3. **STRUCTURE (Weight: 10%)**: Is the content well-organized with clear flow and logical progression?
+3.  **STRUCTURE & READABILITY (Weight: 20%)**:
+    *   Clear flow?
+    *   Easy to scan?
 
-4. **READABILITY (Weight: 10%)**: Is it easy to read with appropriate use of bullet points, short paragraphs, and clear language?
+4.  **SEO (Weight: 10%)**:
+    *   Natural keyword usage?
 
-5. **SEO (Weight: 10%)**: Does it naturally incorporate relevant keywords without stuffing?
-
-Provide a score (1-10) and specific, actionable feedback focusing on quality and conciseness improvements.
+Provide a score (1-10) and specific, actionable feedback.
+**CRITICAL**: If the content uses long sentences or lacks bullet points, give a LOW score (< 7) and explicitly ask for shorter sentences and more bullet points in the feedback.
 """
         
         # Use gemini_llm_call with structured output
