@@ -9,6 +9,7 @@ import asyncio
 from typing import Optional
 
 from langchain_google_genai import ChatGoogleGenerativeAI
+from src.utils.llm_helpers import gemini_llm_call
 from pydantic import BaseModel, Field
 
 from src.config.settings import get_settings
@@ -89,21 +90,13 @@ categories_covered:
         self.model_name = model_name
         self._llm: Optional[ChatGoogleGenerativeAI] = None
     
-    @property
-    def llm(self) -> ChatGoogleGenerativeAI:
-        """Lazy initialization of LLM with structured output."""
-        if self._llm is None:
-            if not self.settings.google_api_key:
-                raise ValueError("GOOGLE_API_KEY is required for question generation")
-            
-            base_llm = ChatGoogleGenerativeAI(
-                model=self.model_name,
-                google_api_key=self.settings.google_api_key,
-                temperature=0.7,
-            )
-            self._llm = base_llm.with_structured_output(ResearchQuestions)
-            logger.debug(f"Initialized LLM with model: {self.model_name}")
-        return self._llm
+    def _llm_call(self, messages):
+        return gemini_llm_call(
+            messages,
+            model_name=self.model_name,
+            settings=self.settings,
+            structured_output=ResearchQuestions
+        )
     
     def _build_prompt(self, topic: str, context: Optional[str] = None) -> str:
         """
@@ -146,8 +139,7 @@ categories_covered:
             {"role": "user", "content": prompt},
         ]
         try:
-            result: ResearchQuestions = await self.llm.ainvoke(messages)
-            # Truncate to 12 if LLM returns more
+            result: ResearchQuestions = self._llm_call(messages)
             if len(result.questions) > 12:
                 logger.warning(f"LLM returned {len(result.questions)} questions, truncating to 12.")
                 result.questions = result.questions[:12]

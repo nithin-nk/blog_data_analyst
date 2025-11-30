@@ -211,4 +211,3 @@ outputs/
 !outputs/.gitkeep
 inputs/*.yaml
 !inputs/example_input.yaml
-outputs_test/

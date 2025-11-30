@@ -7,7 +7,7 @@ Generates catchy titles, relevant tags, and SEO meta descriptions.
 from typing import List, Dict, Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
 
 from src.config.settings import get_settings
 from src.utils.logger import setup_logger

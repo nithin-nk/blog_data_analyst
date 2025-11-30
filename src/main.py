@@ -571,23 +571,58 @@ def generate(
         console.print("[yellow]⚠️  Running in DRY RUN mode[/yellow]")
     
     try:
-        with Progress() as progress:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
             task = progress.add_task("[cyan]Processing...", total=10)
             
             # Step 1: Parse YAML
             progress.update(task, advance=1, description="[cyan]Parsing YAML input...")
             logger.info(f"Parsing input file: {input_file}")
-            # TODO: Implement YAML parsing
             
-            # Step 2: Research
-            progress.update(task, advance=1, description="[cyan]Researching topics...")
-            logger.info("Starting web research")
-            # TODO: Implement research
+            outline_data = FileHandler.read_yaml(input_file)
+            topic = outline_data.get("topic")
+            if not topic:
+                raise ValueError("Input YAML must contain a 'topic' field")
+            
+            # Setup paths
+            if output_dir is None:
+                output_dir = settings.output_dir
+            
+            paths = FileHandler.create_blog_structure(topic, output_dir)
+            
+            # Step 2: Research (Skipped in generate mode, assuming it exists)
+            progress.update(task, advance=1, description="[cyan]Checking research data...")
+            research_path = paths["extracted_content"]
+            if not research_path.exists():
+                logger.warning(f"Research data not found at {research_path}. Content generation may be poor.")
+                # In a real scenario, we might want to fail or trigger research here.
+                # For now, we'll proceed but the generator might fail if it strictly needs it.
+                # Actually, the generator needs it.
+                if not dry_run:
+                     raise FileNotFoundError(f"Research data not found at {research_path}. Please run 'research' command first.")
             
             # Step 3: Generate content
             progress.update(task, advance=1, description="[cyan]Generating content...")
             logger.info("Generating blog content")
-            # TODO: Implement content generation
+            
+            if not dry_run:
+                from src.generation.content_generator import ContentGenerator
+                content_generator = ContentGenerator()
+                
+                def update_progress(msg):
+                    progress.update(task, description=f"[cyan]{msg}")
+                
+                draft_content = content_generator.generate_blog_post(input_file, research_path, progress_callback=update_progress)
+                
+                # Save draft
+                FileHandler.write_file(paths["draft"], draft_content)
+                console.print(f"[green]✓[/green] Draft content saved to: {paths['draft']}")
+            else:
+                draft_content = "# Dry Run Content"
+                console.print("[yellow]Dry run: Skipping content generation[/yellow]")
             
             # Step 4: Generate code/diagrams
             progress.update(task, advance=1, description="[cyan]Generating code & diagrams...")
@@ -621,6 +656,7 @@ def generate(
             # TODO: Implement HTML conversion and saving
             
         console.print("[bold green]✅ Blog generation complete![/bold green]")
+        console.print(f"Draft saved to: {paths['draft']}")
         
     except Exception as e:
         logger.error(f"Error during blog generation: {e}", exc_info=True)

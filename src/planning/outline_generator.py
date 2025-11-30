@@ -8,6 +8,7 @@ import asyncio
 from typing import Optional
 
 from langchain_google_genai import ChatGoogleGenerativeAI
+from src.utils.llm_helpers import gemini_llm_call
 from pydantic import BaseModel, Field
 
 from src.config.settings import get_settings
@@ -159,21 +160,13 @@ Generate a structured JSON/YAML response matching the `BlogOutline` schema. Ensu
         self.model_name = model_name
         self._llm: Optional[ChatGoogleGenerativeAI] = None
 
-    @property
-    def llm(self) -> ChatGoogleGenerativeAI:
-        """Lazy initialization of LLM with structured output."""
-        if self._llm is None:
-            if not self.settings.google_api_key:
-                raise ValueError("GOOGLE_API_KEY is required for outline generation")
-
-            base_llm = ChatGoogleGenerativeAI(
-                model=self.model_name,
-                google_api_key=self.settings.google_api_key,
-                temperature=0.7,
-            )
-            self._llm = base_llm.with_structured_output(BlogOutline)
-            logger.debug(f"Initialized LLM with model: {self.model_name}")
-        return self._llm
+    def _llm_call(self, messages):
+        return gemini_llm_call(
+            messages,
+            model_name=self.model_name,
+            settings=self.settings,
+            structured_output=BlogOutline
+        )
 
     def _format_research_data(self, research_data: AggregatedExtractedContent) -> str:
         """
@@ -267,7 +260,7 @@ Generate a structured JSON/YAML response matching the `BlogOutline` schema. Ensu
         ]
 
         try:
-            result: BlogOutline = await self.llm.ainvoke(messages)
+            result: BlogOutline = self._llm_call(messages)
             logger.info(f"Generated outline with {len(result.sections)} sections")
             return result
         except Exception as e:

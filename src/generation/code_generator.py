@@ -7,7 +7,8 @@ Generates code snippets and Mermaid diagrams based on outline markers.
 from typing import Optional
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.prompts import ChatPromptTemplate
+from src.utils.llm_helpers import gemini_llm_call
+from langchain_core.prompts import ChatPromptTemplate
 
 from src.config.settings import get_settings
 from src.utils.logger import setup_logger
@@ -22,11 +23,7 @@ class CodeGenerator:
     def __init__(self) -> None:
         """Initialize the code generator."""
         self.settings = get_settings()
-        self.llm = ChatGoogleGenerativeAI(
-            model="gemini-pro",
-            google_api_key=self.settings.google_api_key,
-            temperature=0.3,  # Lower temperature for more consistent code
-        )
+        # LLM handled by helper
         logger.info("CodeGenerator initialized")
     
     async def generate_code(
@@ -65,9 +62,11 @@ Language: {language}
 Generate a code example with explanation."""),
         ])
         
-        # TODO: Implement actual code generation
-        result = "```python\n# TODO: Code will be generated here\n```"
-        
+        messages = prompt.format(topic=topic, question=question, language=language or "python")
+        result = gemini_llm_call([
+            {"role": "system", "content": "You are an expert programmer. Generate clean, well-commented code that demonstrates the concept clearly."},
+            {"role": "user", "content": f"Topic: {topic}\nQuestion: {question}\nLanguage: {language or 'python'}\nGenerate a code example with explanation."}
+        ], model_name="gemini-pro", settings=self.settings)
         logger.info("Code generated successfully")
         return result
     
@@ -90,9 +89,10 @@ Generate a code example with explanation."""),
         """
         logger.info(f"Generating Mermaid diagram for: {question}")
         
-        # TODO: Implement Mermaid generation
-        result = "```mermaid\ngraph TD\n    A[Start] --> B[End]\n```"
-        
+        result = gemini_llm_call([
+            {"role": "system", "content": "You are an expert programmer. Generate a mermaid diagram for visualization."},
+            {"role": "user", "content": f"Topic: {topic}\nQuestion: {question}\nDiagram Type: {diagram_type or 'flowchart'}\nGenerate a mermaid diagram."}
+        ], model_name="gemini-pro", settings=self.settings)
         logger.info("Mermaid diagram generated successfully")
         return result
     
