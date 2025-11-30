@@ -3,6 +3,7 @@ import yaml
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable
+from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from src.config.settings import get_settings
@@ -11,49 +12,20 @@ from src.utils.llm_helpers import gemini_llm_call
 
 logger = get_logger(__name__)
 
-def gemini_llm_call(messages, model_name: str = "gemini-2.5-flash", settings=None, structured_output=None, max_retries=None, retry_delay=None):
-    """
-    Helper to call Gemini LLM with cycling through GOOGLE_API_KEY, GOOGLE_API_KEY_1, GOOGLE_API_KEY_2.
-    Tries both main and preview models for each key. Logs warnings on rate limit errors.
-    """
-    if settings is None:
-        settings = get_settings()
-    keys = [
-        getattr(settings, "google_api_key", None),
-        getattr(settings, "google_api_key_1", None),
-        getattr(settings, "google_api_key_2", None)
-    ]
-    keys = [k for k in keys if k]
-    models = [model_name, model_name+"-preview"]
-    max_retries = max_retries or getattr(settings, "max_retries", 3)
-    retry_delay = retry_delay or getattr(settings, "retry_delay", 2)
-    last_error = None
-    for attempt in range(max_retries):
-        for key in keys:
-            for m in models:
-                try:
-                    llm = ChatGoogleGenerativeAI(
-                        model=m,
-                        google_api_key=key,
-                        temperature=0.7,
-                        convert_system_message_to_human=True
-                    )
-                    if structured_output:
-                        llm = llm.with_structured_output(structured_output)
-                    response = llm.invoke(messages)
-                    return response.content if hasattr(response, "content") else response
-                except Exception as e:
-                    logger.warning(f"Gemini LLM rate/error for key {key[:6]}..., model {m}: {e}")
-                    last_error = e
-                    time.sleep(retry_delay)
-        logger.info(f"Retrying Gemini LLM call, attempt {attempt+1}/{max_retries}")
-    logger.error(f"All Gemini LLM keys exhausted. Last error: {last_error}")
-    raise last_error
+
+class SectionReview(BaseModel):
+    """Structured output model for section content review."""
+    score: float = Field(
+        description="Quality score from 1-10, where 10 is perfect. Consider: Quality (35%), Conciseness (35%), Structure (10%), Readability (10%), SEO (10%)"
+    )
+    feedback: str = Field(
+        description="Detailed, actionable feedback on what needs improvement, especially regarding quality and conciseness. Use bullet points."
+    )
+
 
 class ContentGenerator:
     def __init__(self):
         self.settings = get_settings()
-        # LLMs now handled by helper
 
     def _load_yaml(self, file_path: Path) -> Dict[str, Any]:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -91,37 +63,223 @@ class ContentGenerator:
                                 section: Dict[str, Any], 
                                 research_content: str, 
                                 previous_context: str,
-                                topic: str) -> str:
+                                topic: str,
+                                feedback: Optional[str] = None,
+                                existing_content: Optional[str] = None) -> str:
         heading = section.get('heading', '')
         summary = section.get('summary', '')
-        prompt = f"""
-        You are an expert technical blog writer. You are writing a section for a blog post titled "{topic}".
         
-        Current Subtopic: {heading}
-        Subtopic Summary: {summary}
-        
-        Research Content (from top references):
-        {research_content}
-        
-        Context from previous sections:
-        {previous_context if previous_context else "This is the first section."}
-        
-        Instructions:
-        1. Write concise and to-the-point content for this subtopic.
-        2. Use bullet points where appropriate to improve readability. Avoid long, dense paragraphs.
-        3. Include relevant links to the provided references (max 2 links). Format: [Link Text](URL).
-        4. Ensure a smooth flow from the previous context.
-        5. Optimize for SEO (use relevant keywords naturally).
-        6. If relevant, generate code snippets surrounded by triple backticks (e.g., ```python ... ```).
-        7. If relevant, generate Mermaid flow diagrams surrounded by triple backticks (e.g., ```mermaid ... ```).
-        8. The content should be simple and easy to understand.
-        9. Base the content strictly on the provided research context.
-        10. Do not write a conclusion for the whole blog, just this section.
-        
-        Generate the content for this section now.
-        """
+        if feedback and existing_content:
+            # Regeneration mode with feedback
+            prompt = f"""
+You are an expert technical blog writer revising a section for a blog post titled "{topic}".
+
+Current Subtopic: {heading}
+Subtopic Summary: {summary}
+
+EXISTING CONTENT TO REVISE:
+{existing_content}
+
+REVIEW FEEDBACK:
+{feedback}
+
+Research Content (from top references):
+{research_content}
+
+Context from previous sections:
+{previous_context if previous_context else "This is the first section."}
+
+CRITICAL REQUIREMENTS:
+
+1. REVISE the existing content based on the feedback above, focusing especially on QUALITY and CONCISENESS.
+
+2. MAINTAIN the structure and flow while addressing all feedback points.
+
+3. Keep all the other requirements below:
+"""
+        else:
+            # Initial generation mode
+            prompt = f"""
+You are an expert technical blog writer. You are writing a section for a blog post titled "{topic}".
+
+Current Subtopic: {heading}
+Subtopic Summary: {summary}
+
+Research Content (from top references):
+{research_content}
+
+Context from previous sections:
+{previous_context if previous_context else "This is the first section."}
+
+CRITICAL REQUIREMENTS:
+
+1. CONCISENESS: Write concise, to-the-point content for this subtopic only. This is ONE subsection of the blog, not the entire article.
+
+2. FORMATTING: Use bullet points liberally to improve readability. Avoid long, dense paragraphs. Break complex ideas into digestible points.
+
+3. REFERENCES: Include relevant links to the provided references (MAXIMUM 2 links per section). Format: [descriptive text](URL). Only link to URLs from the research content provided above.
+
+4. FLOW & COHESION: Ensure smooth transitions from the previous sections. The content must feel like a natural continuation of the blog, maintaining a cohesive narrative throughout.
+
+5. SEO OPTIMIZATION: Use relevant keywords naturally. Include the main topic and subtopic keywords where appropriate without keyword stuffing.
+
+6. CODE SNIPPETS: If the subtopic involves technical implementation or examples, generate well-commented code snippets using triple backticks with language specification (e.g., ```python, ```javascript, etc.).
+
+7. DIAGRAMS: If the subtopic involves processes, workflows, or system architecture, create Mermaid diagrams using triple backticks (e.g., ```mermaid). Use flowcharts, sequence diagrams, or other appropriate diagram types.
+
+8. ACCESSIBILITY: Write in simple, clear language that anyone can understand, regardless of their technical background. Explain jargon when necessary.
+
+9. CONTEXT ACCURACY: Base ALL content strictly on the provided research context above. Do not invent facts or add information not supported by the research.
+
+10. SCOPE CONTROL: Remember this is just ONE subsection. Keep it focused and appropriately sized - not too long, not too short. Do not write conclusions for the entire blog post.
+
+Generate the content for this section now.
+"""
         messages = [HumanMessage(content=prompt)]
         return gemini_llm_call(messages, model_name="gemini-2.5-flash", settings=self.settings)
+    
+    def _review_section_content(self,
+                              topic: str,
+                              heading: str,
+                              content: str) -> Dict[str, Any]:
+        """
+        Reviews section content and provides a quality score and feedback.
+        Prioritizes quality and conciseness using structured output.
+        
+        Returns:
+            Dict with 'score' (float) and 'feedback' (str)
+        """
+        prompt = f"""
+You are an expert content reviewer evaluating a blog section for quality.
+
+Blog Title: {topic}
+Section Heading: {heading}
+
+CONTENT TO REVIEW:
+{content}
+
+EVALUATION CRITERIA (prioritize quality and conciseness):
+
+1. **QUALITY (Weight: 35%)**: Is the content accurate, insightful, and valuable? Does it provide actionable information?
+
+2. **CONCISENESS (Weight: 35%)**: Is the content concise and to-the-point? No unnecessary verbosity or repetition?
+
+3. **STRUCTURE (Weight: 10%)**: Is the content well-organized with clear flow and logical progression?
+
+4. **READABILITY (Weight: 10%)**: Is it easy to read with appropriate use of bullet points, short paragraphs, and clear language?
+
+5. **SEO (Weight: 10%)**: Does it naturally incorporate relevant keywords without stuffing?
+
+Provide a score (1-10) and specific, actionable feedback focusing on quality and conciseness improvements.
+"""
+        
+        # Use gemini_llm_call with structured output
+        review_model = self.settings.section_reviewer_model
+        messages = [HumanMessage(content=prompt)]
+        
+        try:
+            review = gemini_llm_call(
+                messages,
+                model_name=review_model,
+                settings=self.settings,
+                structured_output=SectionReview
+            )
+            return {
+                'score': review.score,
+                'feedback': review.feedback
+            }
+        except Exception as e:
+            logger.warning(f"Structured output failed: {e}. Using fallback.")
+            return {
+                'score': 5.0,
+                'feedback': f"Review failed: {str(e)}"
+            }
+    
+    def _generate_section_with_review(self,
+                                     section: Dict[str, Any],
+                                     research_content: str,
+                                     previous_context: str,
+                                     topic: str,
+                                     progress_callback: Optional[Any] = None) -> str:
+        """
+        Generates section content with iterative review and improvement.
+        Continues up to max_section_review_iterations until quality threshold is met.
+        Returns the best version if threshold is never reached.
+        """
+        max_iterations = self.settings.max_section_review_iterations
+        threshold = self.settings.section_quality_threshold
+        heading = section.get('heading', '')
+        
+        # Log section heading prominently
+        msg = f"\n{'='*80}\n📝 SECTION: {heading}\n{'='*80}"
+        logger.info(msg)
+        if progress_callback:
+            progress_callback(msg)
+        
+        best_content = None
+        best_score = 0.0
+        
+        for iteration in range(1, max_iterations + 1):
+            msg = f"  [Iteration {iteration}/{max_iterations}] Generating content..."
+            logger.info(msg)
+            if progress_callback:
+                progress_callback(msg)
+            
+            # Generate content (with feedback if not first iteration)
+            if iteration == 1:
+                content = self._generate_section_content(
+                    section,
+                    research_content,
+                    previous_context,
+                    topic
+                )
+            else:
+                content = self._generate_section_content(
+                    section,
+                    research_content,
+                    previous_context,
+                    topic,
+                    feedback=feedback,
+                    existing_content=best_content
+                )
+            
+            # Review the content
+            msg = f"  [Iteration {iteration}/{max_iterations}] Reviewing content..."
+            logger.info(msg)
+            if progress_callback:
+                progress_callback(msg)
+            
+            review_result = self._review_section_content(topic, heading, content)
+            score = review_result['score']
+            feedback = review_result['feedback']
+            
+            # Log score prominently with visual indicator
+            score_emoji = "✅" if score > threshold else "⚠️"
+            msg = f"  {score_emoji} [Iteration {iteration}/{max_iterations}] SCORE: {score:.1f}/10 (threshold: {threshold})"
+            logger.info(msg)
+            if progress_callback:
+                progress_callback(msg)
+            
+            # Track best version
+            if score > best_score:
+                best_score = score
+                best_content = content
+            
+            # Check if threshold met
+            if score > threshold:
+                msg = f"  ✓ Quality threshold met (score: {score:.1f} > {threshold})!"
+                logger.info(msg)
+                if progress_callback:
+                    progress_callback(msg)
+                return content
+        
+        # Threshold not met after all iterations, return best version
+        msg = f"  Using best version (score: {best_score:.1f} after {max_iterations} iterations)"
+        logger.info(msg)
+        if progress_callback:
+            progress_callback(msg)
+        
+        return best_content
 
     def generate_blog_post(self, outline_path: Path, research_path: Path, progress_callback: Optional[Any] = None) -> str:
         """
@@ -149,11 +307,13 @@ class ContentGenerator:
             references = section.get('references', [])
             research_content = self._get_research_content(references, research_data)
             
-            section_content = self._generate_section_content(
-                section, 
-                research_content, 
-                previous_context, 
-                topic
+            # Generate section with iterative review
+            section_content = self._generate_section_with_review(
+                section,
+                research_content,
+                previous_context,
+                topic,
+                progress_callback
             )
             
             # Append to full content

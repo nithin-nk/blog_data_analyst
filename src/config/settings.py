@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     outline_quality_threshold: float = 9.5
     outline_reviewer_model: str = "gemini-2.5-flash"
     
+    # Section Content Review Settings
+    max_section_review_iterations: int = 3
+    section_quality_threshold: float = 9.0
+    section_reviewer_model: str = "gemini-2.5-flash"
+    
     # File Paths
     input_dir: Path = Path("inputs")
     output_dir: Path = Path("outputs")

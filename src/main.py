@@ -614,6 +614,7 @@ def generate(
                 
                 def update_progress(msg):
                     progress.update(task, description=f"[cyan]{msg}")
+                    console.print(msg)  # Also print directly to console
                 
                 draft_content = content_generator.generate_blog_post(input_file, research_path, progress_callback=update_progress)
                 
