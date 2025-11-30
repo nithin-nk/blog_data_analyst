@@ -297,6 +297,9 @@ async def run_research_pipeline(
         max_iterations = settings.max_outline_iterations
         quality_threshold = settings.outline_quality_threshold
         
+        # Track all iterations to fallback to best score if needed
+        iteration_history = []  # List of (score, outline, review)
+
         for iteration in range(1, max_iterations + 1):
             console.print(f"\n[bold cyan]━━━ Iteration {iteration}/{max_iterations} ━━━[/bold cyan]")
             
@@ -304,6 +307,9 @@ async def run_research_pipeline(
             console.print("[dim]Reviewing outline quality...[/dim]")
             review = await outline_reviewer.review(outline)
             reviews.append(review)
+            
+            # Store iteration data
+            iteration_history.append((review.score, outline, review))
             
             # Display review feedback
             outline_reviewer.display_review(review, iteration, console)
@@ -324,6 +330,34 @@ async def run_research_pipeline(
                 console.print(
                     f"[yellow]⚠ Max iterations reached. Final score: {review.score:.1f}/{quality_threshold}[/yellow]"
                 )
+                
+                # Fallback logic: Select best iteration
+                best_iteration = max(iteration_history, key=lambda x: x[0])
+                best_score, best_outline, best_review = best_iteration
+                
+                if best_score > review.score:
+                    console.print(f"\n[bold yellow]Reverting to best iteration (Score: {best_score:.1f})...[/bold yellow]")
+                    outline = best_outline
+                    # We might want to append the best review again or just rely on the history
+                    # But for the final score reporting, we should probably use the best score.
+                    # The reviews list already contains all reviews.
+                    # Let's ensure the final reported score matches the selected outline.
+                    # We can't easily "fix" the reviews list to make the last one the best one without confusing history,
+                    # but we can ensure the return value uses the best outline.
+                    
+                    # Update reviews list to reflect the final decision? 
+                    # Or just proceed with the best outline. 
+                    # The `reviews[-1]` is used later for score reporting. 
+                    # Let's append the best review again to `reviews` so it looks like the final state?
+                    # Or just rely on `iteration_history`.
+                    
+                    # Simplest approach: Just set outline to best_outline. 
+                    # The `reviews` list is for history. 
+                    # But `reviews[-1]` is used for final score display.
+                    # So let's append the best review to `reviews` if it's not the last one.
+                    if best_review != reviews[-1]:
+                         reviews.append(best_review)
+                         console.print(f"[dim]Restored review from best iteration.[/dim]")
         
         # Save all reviews to YAML
         await outline_reviewer.save_reviews(reviews, paths["outline_reviews"])
