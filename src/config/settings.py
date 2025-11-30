@@ -1,0 +1,67 @@
+"""
+Settings module for environment-aware configuration.
+
+Manages all configuration including API keys, file paths, and runtime settings.
+"""
+
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables."""
+    
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+    
+    # LLM API Keys
+    google_api_key: str = ""
+    openai_api_key: str = ""
+    
+    # Image Generation (Banana/Nano)
+    banana_api_key: str = ""
+    banana_model_key: str = ""
+    
+    # Environment Configuration
+    environment: Literal["dev", "test", "prod"] = "dev"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    
+    # Rate Limiting & Retries
+    max_retries: int = 3
+    retry_delay: int = 2
+    scraping_rate_limit: int = 10
+    
+    # Content Generation Settings
+    max_refinement_iterations: int = 3
+    quality_threshold: int = 8
+    
+    # File Paths
+    input_dir: Path = Path("inputs")
+    output_dir: Path = Path("outputs")
+    
+    def __init__(self, **kwargs):
+        """Initialize settings and create necessary directories."""
+        super().__init__(**kwargs)
+        self.input_dir.mkdir(exist_ok=True, parents=True)
+        self.output_dir.mkdir(exist_ok=True, parents=True)
+        (self.output_dir / "drafts").mkdir(exist_ok=True, parents=True)
+        (self.output_dir / "final").mkdir(exist_ok=True, parents=True)
+        (self.output_dir / "images").mkdir(exist_ok=True, parents=True)
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    """
+    Get cached settings instance.
+    
+    Returns:
+        Settings: Application settings
+    """
+    return Settings()

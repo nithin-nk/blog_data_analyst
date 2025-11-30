@@ -1,0 +1,22 @@
+# Sample Blog Input for Testing
+
+# This is an example input file for the Blog Data Analyst AI Agent
+# Replace this with your actual blog topic and outline
+
+topic: "Getting Started with Python Programming"
+
+outline:
+  - "What is Python and why is it popular?"
+  - "Setting up your Python development environment"
+  - "Code: Hello World program and basic syntax"
+  - "Understanding Python data types"
+  - "Mermaid: Python program execution flow"
+  - "Writing your first Python function"
+  - "Best practices for Python beginners"
+  - "Code: Simple calculator example"
+  - "Next steps in your Python journey"
+
+metadata:
+  target_audience: "Programming beginners"
+  estimated_reading_time: "10 minutes"
+  difficulty: "Beginner"
