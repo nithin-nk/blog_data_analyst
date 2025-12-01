@@ -659,9 +659,31 @@ def generate(
                 draft_content = "# Dry Run Content"
                 console.print("[yellow]Dry run: Skipping content generation[/yellow]")
             
-            # Step 4: Generate code/diagrams
-            progress.update(task, advance=1, description="[cyan]Generating code & diagrams...")
-            # TODO: Implement code/diagram generation
+            # Step 4: Generate diagrams
+            progress.update(task, advance=1, description="[cyan]Generating mermaid diagrams...")
+            
+            if not dry_run and draft_content:
+                from src.generation.diagram_generator import DiagramGenerator
+                
+                def diagram_progress(msg):
+                    console.print(msg)
+                
+                diagram_generator = DiagramGenerator()
+                diagrams = diagram_generator.generate_all_diagrams(
+                    title=topic,
+                    content=draft_content,
+                    progress_callback=diagram_progress
+                )
+                
+                if diagrams:
+                    # Save diagrams to YAML
+                    diagrams_path = paths["blog_dir"] / "diagrams.yaml"
+                    diagram_generator.save_diagrams(diagrams, diagrams_path)
+                    console.print(f"[green]✓[/green] Generated {len(diagrams)} diagrams, saved to: {diagrams_path}")
+                else:
+                    console.print("[yellow]No diagrams generated[/yellow]")
+            else:
+                console.print("[yellow]Dry run: Skipping diagram generation[/yellow]")
             
             # Step 5: Combine sections
             progress.update(task, advance=1, description="[cyan]Combining sections...")

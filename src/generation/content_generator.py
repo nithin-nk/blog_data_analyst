@@ -151,9 +151,8 @@ CRITICAL REQUIREMENTS:
 3.  **FORMATTING**:
     *   Use `###` for sub-sections.
     *   Use bullet points.
-4.  **CODE & DIAGRAMS**:
+4.  **CODE**:
     *   Include relevant code snippets (```python, etc.).
-    *   Use Mermaid diagrams where appropriate.
 5.  **LINKS**:
     *   Max 2 relevant links per section from provided research.
 6.  **SCOPE**:

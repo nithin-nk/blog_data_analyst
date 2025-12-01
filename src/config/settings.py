@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     section_quality_threshold: float = 9.0
     section_reviewer_model: str = "gemini-2.5-flash"
     
+    # Diagram Generation Settings
+    diagram_identifier_model: str = "gemini-2.5-flash"
+    diagram_generator_model: str = "gemini-2.5-flash"
+    diagram_reviewer_model: str = "gemini-2.5-flash"
+    max_diagram_generation_attempts: int = 3
+    diagram_quality_threshold: float = 9.0
+    
     # File Paths
     input_dir: Path = Path("inputs")
     output_dir: Path = Path("outputs")

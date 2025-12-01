@@ -83,14 +83,14 @@ EVALUATION CRITERIA (Score each 0.0-10.0):
 3. **Depth & Originality** (0.0-10.0):
    - Are section descriptions specific and detailed?
    - Do summaries clearly explain WHAT and WHY?
-   - Are code/diagram instructions concrete?
+   - Are code instructions concrete?
    - Does the outline promise original insights beyond obvious information?
    - Will content add substantial value vs. just rehashing existing sources?
    - Does it avoid promising answers to unanswerable questions?
 
 4. **Balance & Content Mix** (0.0-10.0):
    - Good mix of conceptual explanations and practical examples?
-   - Appropriate amount of code examples and diagrams?
+   - Appropriate amount of code examples?
    - Sections are roughly balanced in size/scope?
    - Does it include actionable, useful information for readers?
    - Balance between theory and hands-on guidance?

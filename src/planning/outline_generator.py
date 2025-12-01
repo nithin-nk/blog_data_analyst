@@ -64,7 +64,7 @@ Your task is to create a COMPREHENSIVE yet CONCISE blog post outline that is opt
 CONTENT PHILOSOPHY:
 - Create outlines that enable COMPREHENSIVE content while maintaining QUICK READABILITY (aim for 12-18 min estimated reading time)
 - Balance theory, practical implementation, and real-world context
-- Mix conceptual explanations with hands-on code examples and visual diagrams
+- Mix conceptual explanations with hands-on code examples
 - Maintain a tutorial-like flow that guides readers from understanding to implementation
 
 STRUCTURE GUIDELINES:
@@ -77,8 +77,7 @@ STRUCTURE GUIDELINES:
 2.  **Core Concepts (Foundation)**:
     - Break down complex topics into digestible sections
     - Use analogies or comparisons when helpful
-    - Include architecture diagrams for system-level concepts
-    - Mention "Include Mermaid diagram for [architecture/flow/concept]" when visualizing helps understanding
+
 
 3.  **Implementation (Hands-On)**:
     - Provide step-by-step guides with code examples
@@ -112,16 +111,11 @@ SEO OPTIMIZATION:
 - Include a "Prerequisites" or "What You'll Need" section IF the topic requires specific setup/knowledge
 - Suggest H2/H3 hierarchy that follows SEO best practices
 
-CODE & DIAGRAM SPECIFICATIONS:
+CODE SPECIFICATIONS:
 - **Code Examples**: Specify WHEN and WHAT
   - "Include code example for: [specific task, e.g., 'initializing the client and making the first API call']"
   - Indicate language/framework if multiple options exist
   - Mention if code should show error handling or be basic
-  
-- **Mermaid Diagrams**: Specify PURPOSE
-  - "Include Mermaid diagram showing: [architecture/flow/relationship/sequence]"
-  - Examples: "system architecture diagram", "data flow diagram", "authentication sequence diagram"
-  - Only suggest diagrams when they CLARIFY complexity (not for simple concepts)
 
 REFERENCES:
 - Map 2-5 most relevant URLs to each section
