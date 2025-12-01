@@ -715,6 +715,36 @@ def generate(
             else:
                 console.print("[yellow]Dry run: Skipping blog image generation[/yellow]")
             
+            # Step 4.6: Embed images into draft content
+            progress.update(task, advance=0.5, description="[cyan]Embedding images into content...")
+            
+            if not dry_run and draft_content and diagrams_path.exists():
+                from src.media.image_embedder import ImageEmbedder
+                
+                def embed_progress(msg):
+                    console.print(msg)
+                
+                try:
+                    image_embedder = ImageEmbedder()
+                    draft_content = image_embedder.embed_all_images(
+                        content=draft_content,
+                        diagrams_path=diagrams_path,
+                        progress_callback=embed_progress
+                    )
+                    
+                    # Save updated draft with embedded images
+                    FileHandler.write_file(paths["draft"], draft_content)
+                    console.print(f"[green]✓[/green] Images embedded and draft updated: {paths['draft']}")
+                    
+                except Exception as e:
+                    logger.warning(f"Image embedding failed: {e}")
+                    console.print(f"[yellow]⚠ Image embedding failed: {e}[/yellow]")
+            else:
+                if dry_run:
+                    console.print("[yellow]Dry run: Skipping image embedding[/yellow]")
+                elif not diagrams_path.exists():
+                    console.print("[yellow]No diagrams.yaml found, skipping image embedding[/yellow]")
+            
             # Step 5: Combine sections
             progress.update(task, advance=1, description="[cyan]Combining sections...")
             # TODO: Implement section combining

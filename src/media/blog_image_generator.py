@@ -65,11 +65,17 @@ class BlogImageGenerator:
         self._init_genai_client()
 
     def _init_genai_client(self):
-        """Initialize the Google GenAI client."""
-        api_key = self.settings.google_api_key
+        """Initialize the Google GenAI client with paid API key for image generation."""
+        # Use paid key specifically for image generation
+        api_key = self.settings.google_api_paid_key
         if not api_key:
-            raise ValueError("GOOGLE_API_KEY is required for image generation")
+            # Fallback to regular key if paid key not set
+            api_key = self.settings.google_api_key
+            logger.warning("GOOGLE_API_PAID_KEY not set, falling back to GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("GOOGLE_API_PAID_KEY or GOOGLE_API_KEY is required for image generation")
         self.client = genai.Client(api_key=api_key)
+        logger.info("GenAI client initialized with paid API key for image generation")
 
     def generate_image_description(
         self, title: str, content: str

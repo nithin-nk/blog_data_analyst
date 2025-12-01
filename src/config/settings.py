@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     
     # LLM API Keys
     google_api_key: str = ""
+    google_api_key_1: str = ""
+    google_api_key_2: str = ""
+    google_api_paid_key: str = ""  # Paid key for image generation
     openai_api_key: str = ""
     
     # Image Generation (Banana/Nano)
@@ -59,6 +62,9 @@ class Settings(BaseSettings):
     
     # Blog Image Generation Settings
     blog_image_description_model: str = "gemini-2.5-flash"
+    
+    # Image Embedder Settings
+    image_embedder_model: str = "gemini-2.5-flash"
     
     # File Paths
     input_dir: Path = Path("inputs")
