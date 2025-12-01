@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     google_api_paid_key: str = ""  # Paid key for image generation
     openai_api_key: str = ""
     
+    # Azure OpenAI Configuration
+    azure_openai_api_key: str = ""
+    azure_openai_endpoint: str = ""
+    azure_api_version: str = "2025-01-01-preview"
+    azure_deployment_name: str = "gpt-5-chat"
+    
     # Image Generation (Banana/Nano)
     banana_api_key: str = ""
     banana_model_key: str = ""
@@ -65,6 +71,10 @@ class Settings(BaseSettings):
     
     # Image Embedder Settings
     image_embedder_model: str = "gemini-2.5-flash"
+    
+    # Blog Reviewer Settings
+    blog_reviewer_max_iterations: int = 5
+    blog_reviewer_score_threshold: float = 9.0
     
     # File Paths
     input_dir: Path = Path("inputs")

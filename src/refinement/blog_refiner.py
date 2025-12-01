@@ -7,7 +7,7 @@ Applies quality check feedback to improve blog content.
 from typing import Dict, Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
 
 from src.config.settings import get_settings
 from src.optimization.quality_checker import QualityChecker

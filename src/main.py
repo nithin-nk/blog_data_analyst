@@ -30,6 +30,9 @@ from src.research.search_agent import SearchAgent
 from src.research.content_extractor import ContentExtractor
 from src.utils.file_handler import FileHandler
 from src.utils.logger import setup_logger
+from src.refinement.blog_reviewer import BlogReviewer
+from src.converters.md_to_html import MarkdownToHTMLConverter
+from src.generation.metadata_generator import MetadataGenerator
 
 
 console = Console()
@@ -747,19 +750,66 @@ def generate(
             
             # Step 5: Combine sections
             progress.update(task, advance=1, description="[cyan]Combining sections...")
-            # TODO: Implement section combining
+            # Content is already combined during generation
             
             # Step 6: Generate title/tags/meta
             progress.update(task, advance=1, description="[cyan]Generating metadata...")
-            # TODO: Implement metadata generation
+            # Metadata will be extracted during HTML conversion
             
             # Step 7: SEO optimization
             progress.update(task, advance=1, description="[cyan]Optimizing for SEO...")
-            # TODO: Implement SEO optimization
+            # SEO optimization handled by the reviewer feedback loop
             
-            # Step 8: Quality check & refinement
-            progress.update(task, advance=1, description="[cyan]Quality checking...")
-            # TODO: Implement quality check and refinement loop
+            # Step 8: Multi-model blog review & refinement
+            progress.update(task, advance=1, description="[cyan]Starting multi-model blog review...")
+            
+            final_content = draft_content
+            final_review = None
+            review_history_path = paths["blog_dir"] / "review" / "review_history.yaml"
+            
+            if not dry_run and draft_content:
+                console.print("\n" + "="*70)
+                console.print("[bold cyan]📝 BLOG REVIEW & REFINEMENT PHASE[/bold cyan]")
+                console.print("="*70)
+                console.print(f"Models: Gemini 2.5 Pro, Gemini 2.5 Flash, GPT-5-chat")
+                console.print(f"Score Threshold: > {settings.blog_reviewer_score_threshold}")
+                console.print(f"Max Iterations: {settings.blog_reviewer_max_iterations}")
+                console.print("="*70 + "\n")
+                
+                blog_reviewer = BlogReviewer()
+                
+                def review_progress(msg):
+                    console.print(msg)
+                
+                # Run the review and improvement loop
+                final_content, final_review, review_history = asyncio.run(
+                    blog_reviewer.review_and_improve(
+                        title=topic,
+                        content=draft_content,
+                        max_iterations=settings.blog_reviewer_max_iterations,
+                        score_threshold=settings.blog_reviewer_score_threshold,
+                        progress_callback=review_progress,
+                    )
+                )
+                
+                # Save review history
+                blog_reviewer.save_review_history(review_history, review_history_path)
+                console.print(f"\n[green]✓[/green] Review history saved to: {review_history_path}")
+                
+                # Update draft with reviewed content
+                FileHandler.write_file(paths["draft"], final_content)
+                console.print(f"[green]✓[/green] Final draft updated: {paths['draft']}")
+                
+                # Display final review summary
+                console.print("\n" + "="*70)
+                console.print("[bold cyan]📊 FINAL REVIEW SUMMARY[/bold cyan]")
+                console.print("="*70)
+                console.print(f"Final Average Score: {final_review.average_score:.2f}/10")
+                console.print(f"Passed Threshold: {'✅ Yes' if final_review.passes_threshold else '❌ No'}")
+                console.print(f"Total Iterations: {len(review_history)}")
+                console.print("="*70 + "\n")
+            else:
+                console.print("[yellow]Dry run: Skipping blog review[/yellow]")
             
             # Step 9: Image generation handled in Step 4.5
             if not skip_image:
@@ -767,12 +817,113 @@ def generate(
             else:
                 progress.update(task, advance=1)
             
-            # Step 10: Convert to HTML & save
-            progress.update(task, advance=1, description="[cyan]Converting to HTML...")
-            # TODO: Implement HTML conversion and saving
+            # Step 9.5: Generate metadata (titles, tags, description)
+            metadata_result = None
+            metadata_path = paths["blog_dir"] / "metadata.yaml"
             
-        console.print("[bold green]✅ Blog generation complete![/bold green]")
+            if not dry_run and final_content:
+                # Check if blog passed review before generating metadata
+                should_generate_metadata = True
+                if final_review is not None:
+                    should_generate_metadata = final_review.passes_threshold
+                
+                if should_generate_metadata:
+                    console.print("\n" + "="*70)
+                    console.print("[bold cyan]📝 METADATA GENERATION (Titles, Tags, Description)[/bold cyan]")
+                    console.print("="*70)
+                    
+                    metadata_generator = MetadataGenerator()
+                    
+                    def metadata_progress(msg):
+                        console.print(msg)
+                    
+                    # Generate metadata with review loop
+                    metadata_result = metadata_generator.generate_with_review(
+                        topic=topic,
+                        content=final_content,
+                        max_iterations=3,
+                        score_threshold=9.0,
+                        progress_callback=metadata_progress,
+                    )
+                    
+                    # Prompt user to select a title
+                    selected_title = metadata_generator.prompt_title_selection(
+                        titles=metadata_result.titles,
+                        console=console,
+                    )
+                    metadata_result.selected_title = selected_title
+                    
+                    console.print(f"\n[green]✓[/green] Selected title: {selected_title}")
+                    console.print(f"[green]✓[/green] Tags: {', '.join(metadata_result.tags)}")
+                    console.print(f"[green]✓[/green] Description: {metadata_result.search_description}")
+                    
+                    # Save metadata
+                    metadata_generator.save_metadata(metadata_result, metadata_path)
+                    console.print(f"[green]✓[/green] Metadata saved to: {metadata_path}")
+                    console.print("="*70 + "\n")
+                else:
+                    console.print("[yellow]⚠ Skipping metadata generation (blog review score < 9)[/yellow]")
+            else:
+                console.print("[yellow]Dry run: Skipping metadata generation[/yellow]")
+            
+            # Step 10: Convert to HTML & save final output
+            progress.update(task, advance=1, description="[cyan]Converting to HTML...")
+            
+            if not dry_run and final_content:
+                # Check if we should save to final (score > 9)
+                should_save_final = True
+                if final_review is not None:
+                    should_save_final = final_review.passes_threshold
+                
+                if should_save_final:
+                    # Convert to HTML
+                    html_converter = MarkdownToHTMLConverter()
+                    
+                    # Use metadata if available, otherwise fallback
+                    if metadata_result and metadata_result.selected_title:
+                        blog_title = metadata_result.selected_title
+                        meta_description = metadata_result.search_description
+                    else:
+                        blog_title = topic
+                        meta_description = f"A comprehensive guide on {topic}"
+                    
+                    # Check for header image
+                    header_image_path = None
+                    if diagrams_path.exists():
+                        import yaml as yaml_lib
+                        with open(diagrams_path, 'r') as f:
+                            diagrams_data = yaml_lib.safe_load(f) or {}
+                        blog_image_data = diagrams_data.get("blog_image", {})
+                        if blog_image_data.get("base64"):
+                            # Save as file for HTML reference
+                            header_image_path = Path("images/header.png")
+                    
+                    html_content = html_converter.convert(
+                        markdown_content=final_content,
+                        title=blog_title,
+                        meta_description=meta_description,
+                        image_path=header_image_path,
+                    )
+                    
+                    # Save final HTML (use slugified selected title for filename)
+                    final_html_path = paths["final"] / f"{FileHandler.slugify(blog_title)}.html"
+                    FileHandler.write_file(final_html_path, html_content)
+                    console.print(f"[green]✓[/green] Final HTML saved to: {final_html_path}")
+                    
+                    # Also save final markdown
+                    final_md_path = paths["final"] / f"{FileHandler.slugify(blog_title)}.md"
+                    FileHandler.write_file(final_md_path, final_content)
+                    console.print(f"[green]✓[/green] Final markdown saved to: {final_md_path}")
+                else:
+                    console.print(f"[yellow]⚠ Score {final_review.average_score:.2f} < 9.0, keeping as draft only[/yellow]")
+                    console.print(f"[yellow]  Draft location: {paths['draft']}[/yellow]")
+            else:
+                console.print("[yellow]Dry run: Skipping HTML conversion[/yellow]")
+            
+        console.print("\n[bold green]✅ Blog generation complete![/bold green]")
         console.print(f"Draft saved to: {paths['draft']}")
+        if not dry_run and final_review is not None and final_review.passes_threshold:
+            console.print(f"[bold green]Final output saved to: {paths['final']}[/bold green]")
         
     except Exception as e:
         logger.error(f"Error during blog generation: {e}", exc_info=True)
