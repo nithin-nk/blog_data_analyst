@@ -662,6 +662,8 @@ def generate(
             # Step 4: Generate diagrams
             progress.update(task, advance=1, description="[cyan]Generating mermaid diagrams...")
             
+            diagrams_path = paths["blog_dir"] / "diagrams.yaml"
+            
             if not dry_run and draft_content:
                 from src.generation.diagram_generator import DiagramGenerator
                 
@@ -677,13 +679,41 @@ def generate(
                 
                 if diagrams:
                     # Save diagrams to YAML
-                    diagrams_path = paths["blog_dir"] / "diagrams.yaml"
                     diagram_generator.save_diagrams(diagrams, diagrams_path)
                     console.print(f"[green]✓[/green] Generated {len(diagrams)} diagrams, saved to: {diagrams_path}")
                 else:
                     console.print("[yellow]No diagrams generated[/yellow]")
             else:
                 console.print("[yellow]Dry run: Skipping diagram generation[/yellow]")
+            
+            # Step 4.5: Generate blog cover image
+            progress.update(task, advance=0.5, description="[cyan]Generating blog cover image...")
+            
+            if not dry_run and draft_content and not skip_image:
+                from src.media.blog_image_generator import BlogImageGenerator
+                
+                def image_progress(msg):
+                    console.print(msg)
+                
+                try:
+                    blog_image_generator = BlogImageGenerator()
+                    blog_image = blog_image_generator.generate_blog_image(
+                        title=topic,
+                        content=draft_content,
+                        progress_callback=image_progress
+                    )
+                    
+                    # Save to diagrams.yaml
+                    blog_image_generator.save_to_diagrams_yaml(blog_image, diagrams_path)
+                    console.print(f"[green]✓[/green] Blog cover image generated and saved to: {diagrams_path}")
+                    
+                except Exception as e:
+                    logger.warning(f"Blog image generation failed: {e}")
+                    console.print(f"[yellow]⚠ Blog image generation failed: {e}[/yellow]")
+            elif skip_image:
+                console.print("[yellow]Skipping blog image generation (--skip-image flag)[/yellow]")
+            else:
+                console.print("[yellow]Dry run: Skipping blog image generation[/yellow]")
             
             # Step 5: Combine sections
             progress.update(task, advance=1, description="[cyan]Combining sections...")
@@ -701,10 +731,9 @@ def generate(
             progress.update(task, advance=1, description="[cyan]Quality checking...")
             # TODO: Implement quality check and refinement loop
             
-            # Step 9: Generate image
+            # Step 9: Image generation handled in Step 4.5
             if not skip_image:
-                progress.update(task, advance=1, description="[cyan]Generating image...")
-                # TODO: Implement image generation
+                progress.update(task, advance=1, description="[cyan]Blog image already generated...")
             else:
                 progress.update(task, advance=1)
             

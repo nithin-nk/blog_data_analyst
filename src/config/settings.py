@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     max_diagram_generation_attempts: int = 3
     diagram_quality_threshold: float = 9.0
     
+    # Blog Image Generation Settings
+    blog_image_description_model: str = "gemini-2.5-flash"
+    
     # File Paths
     input_dir: Path = Path("inputs")
     output_dir: Path = Path("outputs")
