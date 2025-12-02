@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
-from openai import AzureOpenAI
 
 from src.config.settings import get_settings
 from src.utils.logger import get_logger
@@ -71,25 +70,13 @@ class BlogReviewer:
     """
     Multi-model blog reviewer agent.
     
-    Reviews blog content using Gemini 2.5 Pro, Gemini 2.5 Flash, and GPT-5-chat
-    simultaneously, aggregates scores and feedback, and supports iterative improvement.
+    Reviews blog content using Gemini 2.5 Pro, Gemini 2.5 Flash, and Gemini Flash Latest
+    sequentially, aggregates scores and feedback, and supports iterative improvement.
     """
     
     def __init__(self):
         self.settings = get_settings()
-        self._azure_client: Optional[AzureOpenAI] = None
         logger.info("BlogReviewer initialized")
-    
-    @property
-    def azure_client(self) -> AzureOpenAI:
-        """Lazy initialization of Azure OpenAI client."""
-        if self._azure_client is None:
-            self._azure_client = AzureOpenAI(
-                api_key=self.settings.azure_openai_api_key,
-                api_version=self.settings.azure_api_version,
-                azure_endpoint=self.settings.azure_openai_endpoint,
-            )
-        return self._azure_client
     
     def _get_review_prompt(self, title: str, content: str) -> str:
         """Generate the review prompt."""
@@ -157,90 +144,27 @@ Provide your review in this exact JSON format:
         """Review content with a Gemini model."""
         import json
         import time
-        
-        keys = [
-            self.settings.google_api_key,
-            self.settings.google_api_key_1,
-            self.settings.google_api_key_2,
-        ]
-        keys = [k for k in keys if k]
+        from src.utils.llm_helpers import gemini_llm_call
         
         prompt = self._get_review_prompt(title, content)
         messages = [HumanMessage(content=prompt)]
         
-        # Try with preview suffix variants
-        models_to_try = [model_name]
-        if not model_name.endswith("-preview"):
-            models_to_try.append(f"{model_name}-preview")
-        
-        last_error = None
-        
-        for key in keys:
-            for model in models_to_try:
-                try:
-                    llm = ChatGoogleGenerativeAI(
-                        model=model,
-                        google_api_key=key,
-                        temperature=0.3,  # Lower temp for more consistent reviews
-                        convert_system_message_to_human=True,
-                    )
-                    
-                    response = llm.invoke(messages)
-                    response_text = response.content if hasattr(response, "content") else str(response)
-                    
-                    # Parse JSON response
-                    # Extract JSON from response (handle markdown code blocks)
-                    json_str = response_text
-                    if "```json" in json_str:
-                        json_str = json_str.split("```json")[1].split("```")[0].strip()
-                    elif "```" in json_str:
-                        json_str = json_str.split("```")[1].split("```")[0].strip()
-                    
-                    review_data = json.loads(json_str)
-                    
-                    return ModelReviewResult(
-                        model_name=model_name,
-                        score=float(review_data.get("score", 5.0)),
-                        feedback=review_data.get("feedback", []),
-                        can_apply_feedback=review_data.get("can_apply_feedback", True),
-                    )
-                    
-                except Exception as e:
-                    logger.warning(f"Gemini review failed for {model} with key {key[:6]}...: {e}")
-                    last_error = e
-                    time.sleep(1)
-        
-        return ModelReviewResult(
-            model_name=model_name,
-            score=0.0,
-            feedback=[],
-            can_apply_feedback=False,
-            error=str(last_error) if last_error else "Unknown error",
-        )
-    
-    def _review_with_azure_openai(
-        self,
-        title: str,
-        content: str,
-    ) -> ModelReviewResult:
-        """Review content with Azure OpenAI (GPT-5-chat)."""
-        import json
-        
-        model_name = self.settings.azure_deployment_name
-        prompt = self._get_review_prompt(title, content)
-        
         try:
-            response = self.azure_client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                response_format={"type": "json_object"},
+            response_text = gemini_llm_call(
+                messages,
+                model_name=model_name,
+                settings=self.settings,
             )
             
-            response_text = response.choices[0].message.content
-            review_data = json.loads(response_text)
+            # Parse JSON response
+            # Extract JSON from response (handle markdown code blocks)
+            json_str = response_text
+            if "```json" in json_str:
+                json_str = json_str.split("```json")[1].split("```")[0].strip()
+            elif "```" in json_str:
+                json_str = json_str.split("```")[1].split("```")[0].strip()
+            
+            review_data = json.loads(json_str)
             
             return ModelReviewResult(
                 model_name=model_name,
@@ -250,7 +174,7 @@ Provide your review in this exact JSON format:
             )
             
         except Exception as e:
-            logger.warning(f"Azure OpenAI review failed: {e}")
+            logger.warning(f"Gemini review failed for {model_name}: {e}")
             return ModelReviewResult(
                 model_name=model_name,
                 score=0.0,
@@ -259,6 +183,78 @@ Provide your review in this exact JSON format:
                 error=str(e),
             )
     
+    def _review_with_gemini_flash_preview(
+        self,
+        title: str,
+        content: str,
+    ) -> ModelReviewResult:
+        """Review content with Gemini Flash Latest model."""
+        return self._review_with_gemini(
+            model_name="gemini-flash-latest",
+            title=title,
+            content=content,
+        )
+    
+    def _is_rate_limit_error(self, error: str) -> bool:
+        """Check if error is a rate limit error."""
+        error_lower = error.lower()
+        return "429" in error or "quota" in error_lower or "rate" in error_lower or "exhausted" in error_lower
+
+    def _review_with_retry(
+        self,
+        review_func: Callable,
+        model_name: str,
+        title: str,
+        content: str,
+        max_retries: int = 3,
+        retry_delay: int = 30,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> ModelReviewResult:
+        """
+        Execute a review function with per-model retry on rate limit errors.
+        
+        Args:
+            review_func: The review function to call (_review_with_gemini or _review_with_azure_openai)
+            model_name: Name of the model for logging
+            title: Blog title
+            content: Blog content
+            max_retries: Maximum retry attempts for this specific model
+            retry_delay: Delay in seconds between retries
+            progress_callback: Optional progress callback
+            
+        Returns:
+            ModelReviewResult from the review
+        """
+        import time
+        
+        for attempt in range(1, max_retries + 1):
+            if review_func == self._review_with_gemini_flash_preview:
+                result = review_func(title, content)
+            else:
+                result = review_func(model_name, title, content)
+            
+            # If no error, return the result
+            if result.error is None:
+                return result
+            
+            # Check if it's a rate limit error
+            if self._is_rate_limit_error(result.error):
+                if attempt < max_retries:
+                    if progress_callback:
+                        progress_callback(f"   ⏳ {model_name}: Rate limit hit, waiting {retry_delay}s (retry {attempt}/{max_retries})...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    if progress_callback:
+                        progress_callback(f"   ❌ {model_name}: Rate limit - max retries exceeded")
+            else:
+                # Non-rate-limit error, don't retry
+                if progress_callback:
+                    progress_callback(f"   ❌ {model_name}: Error - {result.error[:50]}...")
+                break
+        
+        return result
+
     async def review_with_all_models(
         self,
         title: str,
@@ -266,9 +262,10 @@ Provide your review in this exact JSON format:
         progress_callback: Optional[Callable[[str], None]] = None,
     ) -> AggregatedReviewResult:
         """
-        Review content with all 3 models simultaneously.
+        Review content with 3 different Gemini models sequentially.
         
-        Models: Gemini 2.5 Pro, Gemini 2.5 Flash, GPT-5-chat
+        Models: Gemini 2.5 Pro, Gemini 2.5 Flash, Gemini Flash Latest
+        Each model has its own retry logic for rate limit errors.
         
         Args:
             title: Blog title
@@ -279,53 +276,66 @@ Provide your review in this exact JSON format:
             AggregatedReviewResult with average score and combined feedback
         """
         if progress_callback:
-            progress_callback("🔍 Starting multi-model review...")
+            progress_callback("🔍 Starting multi-model review (sequential)...")
         
-        # Run reviews in parallel using asyncio
-        loop = asyncio.get_event_loop()
+        model_results: List[ModelReviewResult] = []
         
-        # Create tasks for parallel execution
-        gemini_pro_task = loop.run_in_executor(
-            None,
-            self._review_with_gemini,
-            "gemini-2.5-flash-preview",
-            title,
-            content,
-        )
-        gemini_flash_task = loop.run_in_executor(
-            None,
-            self._review_with_gemini,
-            "gemini-2.5-flash",
-            title,
-            content,
-        )
-        azure_task = loop.run_in_executor(
-            None,
-            self._review_with_azure_openai,
-            title,
-            content,
-        )
-        
+        # Review 1: Gemini 2.5 Pro
         if progress_callback:
             progress_callback("   ├─ Gemini 2.5 Pro: reviewing...")
-            progress_callback("   ├─ Gemini 2.5 Flash: reviewing...")
-            progress_callback("   └─ GPT-5-chat: reviewing...")
         
-        # Wait for all reviews to complete
-        results = await asyncio.gather(
-            gemini_pro_task,
-            gemini_flash_task,
-            azure_task,
-            return_exceptions=True,
+        gemini_pro_result = self._review_with_retry(
+            review_func=self._review_with_gemini,
+            model_name="gemini-2.5-pro",
+            title=title,
+            content=content,
+            max_retries=3,
+            retry_delay=30,
+            progress_callback=progress_callback,
         )
+        model_results.append(gemini_pro_result)
         
-        # Process results
-        model_results: List[ModelReviewResult] = []
-        for result in results:
-            if isinstance(result, Exception):
-                logger.error(f"Review task failed: {result}")
-            elif isinstance(result, ModelReviewResult):
-                model_results.append(result)
+        if gemini_pro_result.error is None:
+            if progress_callback:
+                progress_callback(f"   ✓ Gemini 2.5 Pro: Score {gemini_pro_result.score:.1f}/10")
+        
+        # Review 2: Gemini 2.5 Flash
+        if progress_callback:
+            progress_callback("   ├─ Gemini 2.5 Flash: reviewing...")
+        
+        gemini_flash_result = self._review_with_retry(
+            review_func=self._review_with_gemini,
+            model_name="gemini-2.5-flash",
+            title=title,
+            content=content,
+            max_retries=3,
+            retry_delay=30,
+            progress_callback=progress_callback,
+        )
+        model_results.append(gemini_flash_result)
+        
+        if gemini_flash_result.error is None:
+            if progress_callback:
+                progress_callback(f"   ✓ Gemini 2.5 Flash: Score {gemini_flash_result.score:.1f}/10")
+        
+        # Review 3: Gemini Flash Latest
+        if progress_callback:
+            progress_callback("   └─ Gemini Flash Latest: reviewing...")
+        
+        gemini_preview_result = self._review_with_retry(
+            review_func=self._review_with_gemini_flash_preview,
+            model_name="gemini-flash-latest",
+            title=title,
+            content=content,
+            max_retries=3,
+            retry_delay=30,
+            progress_callback=progress_callback,
+        )
+        model_results.append(gemini_preview_result)
+        
+        if gemini_preview_result.error is None:
+            if progress_callback:
+                progress_callback(f"   ✓ Gemini Flash Latest: Score {gemini_preview_result.score:.1f}/10")
         
         # Calculate aggregate metrics
         valid_results = [r for r in model_results if r.error is None and r.score > 0]
@@ -426,7 +436,7 @@ OUTPUT: Provide the complete revised blog post in markdown format. Start directl
         try:
             revised_content = gemini_llm_call(
                 messages,
-                model_name="gemini-2.5-flash-preview",
+                model_name="gemini-2.5-flash",
                 settings=self.settings,
             )
             

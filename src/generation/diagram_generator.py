@@ -564,7 +564,7 @@ Provide a score, strengths, weaknesses, and specific actionable feedback.
     
     def save_diagrams(self, diagrams: List[GeneratedDiagram], output_path: Path):
         """
-        Save diagrams to YAML file.
+        Save diagrams to YAML file and also save individual image files.
         
         Args:
             diagrams: List of GeneratedDiagram objects
@@ -591,3 +591,39 @@ Provide a score, strengths, weaknesses, and specific actionable feedback.
             yaml.dump(output_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
         
         logger.info(f"Saved {len(diagrams)} diagrams to {output_path}")
+        
+        # Also save individual diagram images to images folder
+        self.save_diagram_images(diagrams, output_path.parent)
+    
+    def save_diagram_images(self, diagrams: List[GeneratedDiagram], blog_dir: Path):
+        """
+        Save diagram images as individual PNG files in the images folder.
+        
+        Args:
+            diagrams: List of GeneratedDiagram objects
+            blog_dir: Blog directory path
+        """
+        # Create images directory
+        images_dir = blog_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        
+        for i, diagram in enumerate(diagrams, 1):
+            if not diagram.image_base64:
+                logger.warning(f"Diagram '{diagram.heading}' has no image data, skipping file save")
+                continue
+            
+            # Generate safe filename from heading
+            safe_heading = re.sub(r"[^\w\s-]", "", diagram.heading.lower())
+            safe_heading = re.sub(r"[-\s]+", "_", safe_heading).strip("_")[:40]
+            filename = f"diagram_{i:02d}_{safe_heading}.png"
+            
+            image_path = images_dir / filename
+            
+            # Decode base64 and save
+            try:
+                image_bytes = base64.b64decode(diagram.image_base64)
+                with open(image_path, "wb") as f:
+                    f.write(image_bytes)
+                logger.info(f"Diagram image saved to: {image_path}")
+            except Exception as e:
+                logger.error(f"Failed to save diagram image '{diagram.heading}': {e}")

@@ -577,6 +577,11 @@ def research(
     help="Run without making API calls (testing mode)",
 )
 @click.option(
+    "--auto-select-title",
+    is_flag=True,
+    help="Automatically select the first generated title without prompting",
+)
+@click.option(
     "--verbose",
     "-v",
     is_flag=True,
@@ -588,6 +593,7 @@ def generate(
     max_iterations: int,
     skip_image: bool,
     dry_run: bool,
+    auto_select_title: bool,
     verbose: bool,
 ) -> None:
     """
@@ -846,10 +852,11 @@ def generate(
                         progress_callback=metadata_progress,
                     )
                     
-                    # Prompt user to select a title
+                    # Prompt user to select a title (or auto-select)
                     selected_title = metadata_generator.prompt_title_selection(
                         titles=metadata_result.titles,
                         console=console,
+                        auto_select=auto_select_title,
                     )
                     metadata_result.selected_title = selected_title
                     

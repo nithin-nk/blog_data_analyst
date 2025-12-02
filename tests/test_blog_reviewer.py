@@ -147,21 +147,17 @@ class TestBlogReviewer:
         assert "score" in prompt.lower()
         assert "feedback" in prompt.lower()
     
-    @patch('src.refinement.blog_reviewer.ChatGoogleGenerativeAI')
-    def test_review_with_gemini_success(self, mock_llm_class, reviewer):
+    @patch('src.utils.llm_helpers.gemini_llm_call')
+    def test_review_with_gemini_success(self, mock_gemini_llm_call, reviewer):
         """Test successful Gemini review."""
-        # Mock LLM response
-        mock_response = Mock()
-        mock_response.content = '''```json
+        # Mock gemini_llm_call response
+        mock_gemini_llm_call.return_value = '''```json
 {
     "score": 8.0,
     "feedback": ["Add more examples", "Improve code snippets"],
     "can_apply_feedback": true
 }
 ```'''
-        mock_llm = Mock()
-        mock_llm.invoke.return_value = mock_response
-        mock_llm_class.return_value = mock_llm
         
         result = reviewer._review_with_gemini("gemini-2.5-pro", SAMPLE_TITLE, SAMPLE_CONTENT)
         
@@ -171,12 +167,10 @@ class TestBlogReviewer:
         assert result.can_apply_feedback is True
         assert result.error is None
     
-    @patch('src.refinement.blog_reviewer.ChatGoogleGenerativeAI')
-    def test_review_with_gemini_all_keys_fail(self, mock_llm_class, reviewer):
+    @patch('src.utils.llm_helpers.gemini_llm_call')
+    def test_review_with_gemini_all_keys_fail(self, mock_gemini_llm_call, reviewer):
         """Test Gemini review when all API keys fail."""
-        mock_llm = Mock()
-        mock_llm.invoke.side_effect = Exception("Rate limit exceeded")
-        mock_llm_class.return_value = mock_llm
+        mock_gemini_llm_call.side_effect = Exception("Rate limit exceeded")
         
         result = reviewer._review_with_gemini("gemini-2.5-flash", SAMPLE_TITLE, SAMPLE_CONTENT)
         

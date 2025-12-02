@@ -15,6 +15,10 @@ import os
 import pytest
 from pathlib import Path
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 from src.media.blog_image_generator import (
     BlogImageGenerator,
     ImageDescription,

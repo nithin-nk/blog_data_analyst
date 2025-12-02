@@ -309,3 +309,40 @@ Generate a creative, visually compelling description for this blog's cover image
             )
 
         logger.info(f"Blog image saved to {diagrams_path}")
+        
+        # Also save the actual image file to images folder
+        self.save_image_file(blog_image, diagrams_path.parent)
+
+    def save_image_file(
+        self, blog_image: GeneratedBlogImage, blog_dir: Path
+    ) -> Path:
+        """
+        Save the blog cover image as an actual file in the images folder.
+
+        Args:
+            blog_image: GeneratedBlogImage object
+            blog_dir: Blog directory path
+
+        Returns:
+            Path to the saved image file
+        """
+        import re
+        
+        # Create images directory
+        images_dir = blog_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate filename from title
+        safe_title = re.sub(r"[^\w\s-]", "", blog_image.title.lower())
+        safe_title = re.sub(r"[-\s]+", "_", safe_title).strip("_")[:50]
+        filename = f"{safe_title}_cover.{blog_image.format}"
+        
+        image_path = images_dir / filename
+        
+        # Decode base64 and save
+        image_bytes = base64.b64decode(blog_image.image_base64)
+        with open(image_path, "wb") as f:
+            f.write(image_bytes)
+        
+        logger.info(f"Blog cover image saved to: {image_path}")
+        return image_path

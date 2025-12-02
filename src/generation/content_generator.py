@@ -105,6 +105,7 @@ CRITICAL REQUIREMENTS FOR REVISION:
         Real-time streaming is needed for modern AI UX.
         ```
 3.  **NO CONVERSATIONAL FILLER**: Output ONLY the blog section content.
+4.  **NO MERMAID DIAGRAMS**: Do NOT include any mermaid code blocks or diagram syntax. Diagrams are generated separately in another step.
 """
         else:
             # Initial generation mode
@@ -157,6 +158,7 @@ CRITICAL REQUIREMENTS:
     *   Max 2 relevant links per section from provided research.
 6.  **SCOPE**:
     *   Focus ONLY on this subtopic.
+7.  **NO MERMAID DIAGRAMS**: Do NOT include any mermaid code blocks or diagram syntax. Diagrams are generated separately in a dedicated step.
 
 Generate the content now.
 """

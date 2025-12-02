@@ -345,6 +345,7 @@ Return JSON:
         self,
         titles: List[str],
         console=None,
+        auto_select: bool = False,
     ) -> str:
         """
         Prompt user to select a title from the list.
@@ -352,10 +353,20 @@ Return JSON:
         Args:
             titles: List of 5 titles to choose from
             console: Rich console for formatted output (optional)
+            auto_select: If True, automatically select the first title without prompting
             
         Returns:
             Selected title string
         """
+        # Auto-select mode: return first title without user interaction
+        if auto_select:
+            logger.info(f"Auto-selected title: {titles[0]}")
+            if console:
+                console.print(f"\n[bold cyan]📋 Auto-selected title:[/bold cyan] {titles[0]}")
+            else:
+                print(f"\nAuto-selected title: {titles[0]}")
+            return titles[0]
+        
         if console:
             from rich.table import Table
             from rich.prompt import Prompt
