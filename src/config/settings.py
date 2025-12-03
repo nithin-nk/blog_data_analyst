@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     google_api_key_1: str = ""
     google_api_key_2: str = ""
+    google_api_key_3: str = ""
+    google_api_key_4: str = ""
     google_api_paid_key: str = ""  # Paid key for image generation
     openai_api_key: str = ""
     
