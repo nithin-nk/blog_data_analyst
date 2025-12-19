@@ -11,7 +11,7 @@
 | Round | Slices | Goal | Status |
 |-------|--------|------|--------|
 | Foundation | Phases 1-5 | Tools, State, Discovery, Planning, Research | ✓ DONE |
-| Round 1 | 6.1-6.4 | Minimal End-to-End CLI | ○ PENDING |
+| Round 1 | 6.1-6.4 | Minimal End-to-End CLI | ✓ DONE |
 | Round 2 | 6.5-6.8 | Quality Layer (Critic + Refine) | ○ PENDING |
 | Round 3 | 6.9-6.11 | Full Human Experience (Rich UI) | ○ PENDING |
 | Round 4 | 6.12-6.15 | Polish Features | ○ PENDING |
@@ -106,7 +106,7 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
 
 ### Slice 6.3: Graph + Routing
 
-**Status**: ○ PENDING
+**Status**: ✓ COMPLETE
 
 **Files to create**:
 - `src/agent/graph.py` (NEW)
@@ -174,7 +174,7 @@ def build_blog_agent_graph() -> StateGraph:
 
 ### Slice 6.4: CLI Start Command
 
-**Status**: ○ PENDING
+**Status**: ✓ COMPLETE
 
 **Files to create**:
 - `src/agent/__main__.py` (NEW)
@@ -747,9 +747,9 @@ async def _re_research_section(section, key_manager) -> list[dict]:
 | Slice | Description | Unit Tests | Integration Tests | Status |
 |-------|-------------|------------|-------------------|--------|
 | 6.1 | Minimal Section Writer | test_writing.py | test_writing_integration.py | ✓ |
-| 6.2 | Basic Assembly | test_assembly.py | test_assembly_integration.py | ○ |
-| 6.3 | Graph + Routing | test_graph.py | test_full_graph.py | ○ |
-| 6.4 | CLI Start Command | test_cli.py | test_cli_integration.py | ○ |
+| 6.2 | Basic Assembly | test_assembly.py | test_assembly_integration.py | ✓ |
+| 6.3 | Graph + Routing | test_graph.py | test_full_graph.py | ✓ |
+| 6.4 | CLI Start Command | test_cli.py | test_cli_integration.py | ✓ |
 | 6.5 | Section Critic | test_writing.py | test_writing_integration.py | ○ |
 | 6.6 | Section Refine Loop | test_writing.py | test_writing_integration.py | ○ |
 | 6.7 | Final Critic | test_assembly.py | test_assembly_integration.py | ○ |
