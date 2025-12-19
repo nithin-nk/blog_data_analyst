@@ -51,10 +51,12 @@ class TestKeyManagerInit:
 
     def test_from_env_loads_keys(self, temp_usage_dir: Path):
         """KeyManager.from_env() loads keys from environment."""
-        with patch.dict(os.environ, {
-            "GOOGLE_API_KEY_1": "env_key_1",
-            "GOOGLE_API_KEY_2": "env_key_2",
-        }, clear=False):
+        # Clear any existing GOOGLE_API_KEY_* vars, then set only our test keys
+        env_copy = {k: v for k, v in os.environ.items()
+                   if not k.startswith("GOOGLE_API_KEY_")}
+        env_copy["GOOGLE_API_KEY_1"] = "env_key_1"
+        env_copy["GOOGLE_API_KEY_2"] = "env_key_2"
+        with patch.dict(os.environ, env_copy, clear=True):
             manager = KeyManager.from_env()
             manager._usage_dir = temp_usage_dir
             assert len(manager.keys) == 2

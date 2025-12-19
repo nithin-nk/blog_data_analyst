@@ -6,7 +6,17 @@ MAX_SOURCES_PER_SECTION = 10
 
 # Validation settings
 MIN_SOURCES_PER_SECTION = 4
-MAX_VALIDATION_RETRIES = 2
+MAX_VALIDATION_RETRIES = 3
+
+# Query diversification modifiers for retries
+# Each retry uses a different focus to find varied sources
+QUERY_DIVERSIFICATION_MODIFIERS = [
+    ["tutorial", "guide", "how to"],
+    ["documentation", "official docs", "API reference"],
+    ["benchmark", "comparison", "performance"],
+    ["case study", "real-world", "production"],
+    ["example", "sample code", "implementation"],
+]
 
 # LLM settings
 LLM_MODEL_LITE = "gemini-2.5-flash-lite"

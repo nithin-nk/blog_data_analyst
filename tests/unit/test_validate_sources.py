@@ -705,9 +705,9 @@ class TestValidateSourcesRetryLogic:
 
                             result = await validate_sources_node(sample_state)
 
-                            # Should have tried max retries per section (2 sections * 2 retries = 4)
-                            # But since each section has 2 max retries:
-                            assert mock_gen_alt.call_count == 4  # 2 retries per 2 sections
+                            # Should have tried max retries per section (2 sections * 3 retries = 6)
+                            # MAX_VALIDATION_RETRIES = 3
+                            assert mock_gen_alt.call_count == 6  # 3 retries per 2 sections
                             # Should still complete (not fail)
                             assert result["current_phase"] == Phase.WRITING.value
 
@@ -736,3 +736,177 @@ class TestValidateSourcesRetryLogic:
                             # Research cache should include new entries from retries
                             assert "research_cache" in result
                             assert "newhash123" in result["research_cache"]
+
+
+# =============================================================================
+# Query Diversification Tests
+# =============================================================================
+
+
+class TestQueryDiversification:
+    """Tests for query diversification in _generate_alternative_queries."""
+
+    @pytest.mark.asyncio
+    async def test_uses_different_modifiers_per_retry(self):
+        """Each retry attempt uses different focus modifiers."""
+        from src.agent.config import QUERY_DIVERSIFICATION_MODIFIERS
+
+        mock_key_manager = MagicMock()
+        mock_key_manager.get_best_key.return_value = "test_key"
+
+        def mock_invoke(*args, **kwargs):
+            return AlternativeQueries(queries=["query1", "query2"])
+
+        with patch("src.agent.nodes.ChatGoogleGenerativeAI") as mock_llm_class:
+            mock_llm = MagicMock()
+            mock_structured = MagicMock()
+            mock_structured.invoke.side_effect = mock_invoke
+            mock_llm.with_structured_output.return_value = mock_structured
+            mock_llm_class.return_value = mock_llm
+
+            # First retry (retry_attempt=0) should use first modifier set
+            await _generate_alternative_queries(
+                blog_title="Test Blog",
+                section={"id": "test", "title": "Test", "role": "problem"},
+                original_queries=["original"],
+                key_manager=mock_key_manager,
+                retry_attempt=0,
+            )
+
+            # Second retry (retry_attempt=1) should use second modifier set
+            await _generate_alternative_queries(
+                blog_title="Test Blog",
+                section={"id": "test", "title": "Test", "role": "problem"},
+                original_queries=["original"],
+                key_manager=mock_key_manager,
+                retry_attempt=1,
+            )
+
+            # Verify both calls used different modifiers
+            assert mock_structured.invoke.call_count == 2
+
+            # Check that first call contains first modifier set keywords
+            first_call_prompt = mock_structured.invoke.call_args_list[0][0][0]
+            first_modifiers = QUERY_DIVERSIFICATION_MODIFIERS[0]
+            assert any(mod in first_call_prompt for mod in first_modifiers)
+
+            # Check that second call contains second modifier set keywords
+            second_call_prompt = mock_structured.invoke.call_args_list[1][0][0]
+            second_modifiers = QUERY_DIVERSIFICATION_MODIFIERS[1]
+            assert any(mod in second_call_prompt for mod in second_modifiers)
+
+    @pytest.mark.asyncio
+    async def test_includes_failed_sources_in_prompt(self):
+        """Failed source URLs are included in the prompt."""
+        mock_key_manager = MagicMock()
+        mock_key_manager.get_best_key.return_value = "test_key"
+
+        with patch("src.agent.nodes.ChatGoogleGenerativeAI") as mock_llm_class:
+            mock_llm = MagicMock()
+            mock_structured = MagicMock()
+            mock_structured.invoke.return_value = AlternativeQueries(queries=["query1", "query2"])
+            mock_llm.with_structured_output.return_value = mock_structured
+            mock_llm_class.return_value = mock_llm
+
+            failed_sources = [
+                {"url": "https://rejected1.com", "title": "Rejected 1"},
+                {"url": "https://rejected2.com", "title": "Rejected 2"},
+            ]
+
+            await _generate_alternative_queries(
+                blog_title="Test Blog",
+                section={"id": "test", "title": "Test", "role": "problem"},
+                original_queries=["original query"],
+                key_manager=mock_key_manager,
+                failed_sources=failed_sources,
+            )
+
+            # Get the prompt that was passed to invoke
+            prompt = mock_structured.invoke.call_args[0][0]
+
+            # Verify failed URLs are in the prompt
+            assert "https://rejected1.com" in prompt
+            assert "https://rejected2.com" in prompt
+            assert "rejected" in prompt.lower() or "avoid" in prompt.lower()
+
+    @pytest.mark.asyncio
+    async def test_no_failed_context_when_none(self):
+        """No failed source context when failed_sources is None or empty."""
+        mock_key_manager = MagicMock()
+        mock_key_manager.get_best_key.return_value = "test_key"
+
+        with patch("src.agent.nodes.ChatGoogleGenerativeAI") as mock_llm_class:
+            mock_llm = MagicMock()
+            mock_structured = MagicMock()
+            mock_structured.invoke.return_value = AlternativeQueries(queries=["query1", "query2"])
+            mock_llm.with_structured_output.return_value = mock_structured
+            mock_llm_class.return_value = mock_llm
+
+            await _generate_alternative_queries(
+                blog_title="Test Blog",
+                section={"id": "test", "title": "Test", "role": "problem"},
+                original_queries=["original"],
+                key_manager=mock_key_manager,
+                failed_sources=None,
+            )
+
+            # Get the prompt that was passed to invoke
+            prompt = mock_structured.invoke.call_args[0][0]
+
+            # Prompt should not contain failed sources section
+            assert "were found but rejected" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_retry_loop_passes_failed_sources(self, sample_state):
+        """Retry loop correctly identifies and passes failed sources."""
+        call_count = 0
+        alt_query_calls = []
+
+        def validate_side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First validation: only 1 source passes
+                return [{"url": "https://good.com", "quality": "high", "reason": "Good"}]
+            elif call_count == 2:
+                # Retry validation: more sources pass
+                return [
+                    {"url": "https://new1.com", "quality": "high", "reason": "New"},
+                    {"url": "https://new2.com", "quality": "high", "reason": "New"},
+                    {"url": "https://new3.com", "quality": "high", "reason": "New"},
+                ]
+            else:
+                # Second section
+                return [
+                    {"url": "https://s1.com", "quality": "high", "reason": "Good"},
+                    {"url": "https://s2.com", "quality": "high", "reason": "Good"},
+                    {"url": "https://s3.com", "quality": "high", "reason": "Good"},
+                    {"url": "https://s4.com", "quality": "high", "reason": "Good"},
+                ]
+
+        async def capture_alt_queries(*args, **kwargs):
+            alt_query_calls.append(kwargs)
+            return ["alternative query"]
+
+        with patch("src.agent.nodes._validate_section_sources") as mock_validate:
+            with patch("src.agent.nodes._generate_alternative_queries") as mock_gen_alt:
+                with patch("src.agent.nodes._research_section") as mock_research:
+                    with patch("src.agent.nodes.KeyManager") as mock_km:
+                        with patch("src.agent.nodes.JobManager") as mock_jm:
+                            mock_validate.side_effect = validate_side_effect
+                            mock_gen_alt.side_effect = capture_alt_queries
+                            mock_research.return_value = (
+                                [{"url": "https://new.com", "content": "Content"}],
+                                {"hash": {"url": "https://new.com", "content": "Content"}},
+                            )
+                            mock_km.from_env.return_value = MagicMock()
+                            mock_jm.return_value = MagicMock()
+
+                            await validate_sources_node(sample_state)
+
+                            # Verify _generate_alternative_queries was called with failed_sources
+                            assert len(alt_query_calls) >= 1
+                            first_call = alt_query_calls[0]
+                            assert "failed_sources" in first_call
+                            assert "retry_attempt" in first_call
+                            assert first_call["retry_attempt"] == 0  # First retry is 0-indexed

@@ -18,6 +18,7 @@ from .config import (
     LLM_TEMPERATURE_MEDIUM,
     MAX_VALIDATION_RETRIES,
     MIN_SOURCES_PER_SECTION,
+    QUERY_DIVERSIFICATION_MODIFIERS,
     TARGET_WORDS_MAP,
 )
 from .key_manager import KeyManager
@@ -797,16 +798,20 @@ async def _generate_alternative_queries(
     section: dict,
     original_queries: list[str],
     key_manager: KeyManager,
+    retry_attempt: int = 0,
+    failed_sources: list[dict] | None = None,
     max_retries: int = 3,
 ) -> list[str]:
     """
-    Generate alternative search queries when sources are insufficient.
+    Generate alternative search queries with diversification strategy.
 
     Args:
         blog_title: Title of the blog
         section: Section dict with id, title, role
         original_queries: Queries that didn't yield enough sources
         key_manager: KeyManager for API key rotation
+        retry_attempt: Which retry this is (0-indexed), used for diversification
+        failed_sources: Sources that were fetched but failed validation
         max_retries: Max LLM retry attempts
 
     Returns:
@@ -814,6 +819,21 @@ async def _generate_alternative_queries(
     """
     section_title = section.get("title") or section.get("id", "")
     section_role = section.get("role", "")
+
+    # Select modifier based on retry attempt for diversification
+    modifiers = QUERY_DIVERSIFICATION_MODIFIERS[
+        retry_attempt % len(QUERY_DIVERSIFICATION_MODIFIERS)
+    ]
+    modifier_hint = f"Focus on finding: {', '.join(modifiers)}"
+
+    # Build context about failed sources to avoid similar domains
+    failed_context = ""
+    if failed_sources:
+        failed_urls = [s.get("url", "") for s in failed_sources[:5]]
+        failed_context = f"""
+
+These sources were found but rejected (avoid similar sites):
+{failed_urls}"""
 
     prompt = f"""The following search queries didn't yield enough quality sources:
 {original_queries}
@@ -823,9 +843,13 @@ Title: "{section_title}"
 Role: {section_role}
 Blog: "{blog_title}"
 
-Generate 2-3 DIFFERENT search queries that might find better sources.
-Focus on: tutorials, documentation, case studies, benchmarks.
-Avoid repeating the same keywords from the original queries.
+{modifier_hint}
+{failed_context}
+
+Generate 2-3 COMPLETELY DIFFERENT search queries that:
+1. Use different keywords and phrasing than the original queries
+2. Target different types of sources ({', '.join(modifiers)})
+3. Avoid the same domains as rejected sources
 
 Output as AlternativeQueries."""
 
@@ -1060,12 +1084,21 @@ async def validate_sources_node(state: BlogAgentState) -> dict[str, Any]:
                     f"retry {retry_count}/{MAX_VALIDATION_RETRIES}"
                 )
 
-                # Generate alternative queries
+                # Identify sources that were fetched but failed validation
+                validated_urls = {s["url"] for s in validated}
+                failed_sources = [
+                    s for s in section_sources
+                    if s.get("url") not in validated_urls
+                ]
+
+                # Generate alternative queries with diversification
                 alt_queries = await _generate_alternative_queries(
                     blog_title=blog_title,
                     section=section,
                     original_queries=list(used_queries),
                     key_manager=key_manager,
+                    retry_attempt=retry_count - 1,  # 0-indexed for modifier selection
+                    failed_sources=failed_sources,
                 )
                 used_queries.update(alt_queries)
 
