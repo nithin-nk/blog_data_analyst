@@ -9,7 +9,7 @@ Tests cover:
 
 import pytest
 from click.testing import CliRunner
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from src.agent.__main__ import cli, start, resume, jobs, show
 
@@ -225,6 +225,13 @@ class TestShowCommand:
         assert "not found" in result.output.lower()
 
 
+def create_mock_astream(final_state):
+    """Create a mock astream that yields the final state."""
+    async def mock_astream(_state):
+        yield {"final_node": final_state}
+    return mock_astream
+
+
 class TestRunStart:
     """Tests for _run_start async function."""
 
@@ -232,7 +239,7 @@ class TestRunStart:
     async def test_run_start_creates_job(self, tmp_path):
         """_run_start creates a new job."""
         from src.agent.__main__ import _run_start
-        from src.agent.state import JobManager, Phase
+        from src.agent.state import Phase
 
         with patch("src.agent.__main__.JobManager") as MockJM, \
              patch("src.agent.__main__.build_blog_agent_graph") as MockGraph:
@@ -243,7 +250,7 @@ class TestRunStart:
             MockJM.return_value = mock_jm
 
             mock_graph = MagicMock()
-            mock_graph.ainvoke = AsyncMock(return_value={
+            mock_graph.astream = create_mock_astream({
                 "current_phase": Phase.REVIEWING.value,
                 "metadata": {"word_count": 500, "reading_time_minutes": 2, "section_count": 3},
             })
@@ -255,7 +262,6 @@ class TestRunStart:
             await _run_start("Test Title", "Test context", "short")
 
             mock_jm.create_job.assert_called_once_with("Test Title", "Test context", "short")
-            mock_graph.ainvoke.assert_called_once()
 
 
 class TestRunResume:
@@ -282,7 +288,7 @@ class TestRunResume:
             MockJM.return_value = mock_jm
 
             mock_graph = MagicMock()
-            mock_graph.ainvoke = AsyncMock(return_value={
+            mock_graph.astream = create_mock_astream({
                 "current_phase": Phase.REVIEWING.value,
             })
             MockGraph.return_value = mock_graph
@@ -290,4 +296,3 @@ class TestRunResume:
             await _run_resume("test-job")
 
             mock_jm.load_state.assert_called_once_with("test-job")
-            mock_graph.ainvoke.assert_called_once()

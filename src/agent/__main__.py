@@ -9,14 +9,39 @@ Usage:
 
 import asyncio
 import sys
+from pathlib import Path
 
 import click
+from dotenv import load_dotenv
 from rich.console import Console
+from rich.status import Status
+
+# Load .env file from project root
+load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
 from .graph import build_blog_agent_graph
 from .state import JobManager, Phase
 
 console = Console()
+
+# Phase display messages
+PHASE_MESSAGES = {
+    "topic_discovery": ("🔍", "Discovering topic and generating search queries..."),
+    "planning": ("📋", "Creating blog outline and section plan..."),
+    "researching": ("🔬", "Researching sources from the web..."),
+    "validating_sources": ("✓", "Validating source quality and relevance..."),
+    "writing": ("✍️", "Writing sections..."),
+    "assembling": ("📦", "Assembling final blog post..."),
+    "reviewing": ("👀", "Final review..."),
+}
+
+
+def _get_phase_message(phase: str, section_info: str = "") -> str:
+    """Get display message for a phase."""
+    icon, msg = PHASE_MESSAGES.get(phase, ("⏳", f"Processing {phase}..."))
+    if section_info:
+        return f"{icon} {msg} {section_info}"
+    return f"{icon} {msg}"
 
 
 @click.group()
@@ -40,17 +65,17 @@ def start(title: str, context: str, length: str):
 
 
 async def _run_start(title: str, context: str, length: str):
-    """Execute the blog generation pipeline."""
-    console.print(f"\n[bold blue]Blog Agent[/bold blue]")
-    console.print(f"Title: {title}")
-    console.print(f"Length: {length}\n")
+    """Execute the blog generation pipeline with real-time progress updates."""
+    console.print(f"\n[bold blue]🚀 Blog Agent[/bold blue]")
+    console.print(f"[dim]Title:[/dim] {title}")
+    console.print(f"[dim]Length:[/dim] {length}\n")
 
     # Create job
     job_manager = JobManager()
     job_id = job_manager.create_job(title, context, length)
 
     console.print(f"[dim]Job ID: {job_id}[/dim]")
-    console.print("[dim]Starting pipeline...[/dim]\n")
+    console.print("")
 
     # Create initial state
     initial_state = {
@@ -65,39 +90,86 @@ async def _run_start(title: str, context: str, length: str):
     }
 
     try:
-        # Build and run graph
+        # Build graph
         graph = build_blog_agent_graph()
-        result = await graph.ainvoke(initial_state)
 
-        # Check result
-        final_phase = result.get("current_phase", "")
+        # Track state for progress display
+        last_phase = None
+        last_section_idx = 0
+        result = initial_state
 
-        if final_phase == Phase.FAILED.value:
-            console.print(f"\n[bold red]Generation failed:[/bold red]")
-            console.print(f"  {result.get('error_message', 'Unknown error')}")
-            sys.exit(1)
+        # Stream through graph execution
+        with Status("[bold blue]Starting...", console=console) as status:
+            async for event in graph.astream(initial_state):
+                # event is a dict with node name as key
+                for node_name, node_output in event.items():
+                    result = {**result, **node_output}
+
+                    current_phase = result.get("current_phase", "")
+                    section_idx = result.get("current_section_index", 0)
+
+                    # Update status based on phase changes
+                    if current_phase != last_phase:
+                        if last_phase:
+                            # Show completion of previous phase
+                            icon, _ = PHASE_MESSAGES.get(last_phase, ("✓", ""))
+                            console.print(f"  [green]✓[/green] {last_phase.replace('_', ' ').title()} complete")
+
+                        # Update spinner for new phase
+                        status.update(_get_phase_message(current_phase))
+                        last_phase = current_phase
+
+                    # Special handling for writing phase - show section progress
+                    elif current_phase == "writing" and section_idx != last_section_idx:
+                        plan = result.get("plan", {})
+                        sections = [s for s in plan.get("sections", []) if not s.get("optional")]
+                        total = len(sections)
+
+                        if section_idx > 0 and section_idx <= total:
+                            prev_section = sections[section_idx - 1] if section_idx > 0 else None
+                            if prev_section:
+                                section_title = prev_section.get("title") or prev_section.get("role", "Section")
+                                console.print(f"    [green]✓[/green] {section_title}")
+
+                        if section_idx < total:
+                            next_section = sections[section_idx]
+                            section_title = next_section.get("title") or next_section.get("role", "Section")
+                            status.update(f"✍️  Writing section {section_idx + 1}/{total}: {section_title}...")
+
+                        last_section_idx = section_idx
+
+                    # Check for failure
+                    if current_phase == Phase.FAILED.value:
+                        status.stop()
+                        console.print(f"\n[bold red]❌ Generation failed:[/bold red]")
+                        console.print(f"   {result.get('error_message', 'Unknown error')}")
+                        sys.exit(1)
+
+            # Final phase completion message
+            if last_phase and last_phase != Phase.FAILED.value:
+                console.print(f"  [green]✓[/green] {last_phase.replace('_', ' ').title()} complete")
 
         # Success
         job_dir = job_manager.get_job_dir(job_id)
         final_path = job_dir / "final.md"
 
-        console.print(f"\n[bold green]Blog generated successfully![/bold green]")
-        console.print(f"Output: {final_path}")
+        console.print(f"\n[bold green]✅ Blog generated successfully![/bold green]")
+        console.print(f"[dim]Output:[/dim] {final_path}")
 
         # Show stats
         metadata = result.get("metadata", {})
         if metadata:
-            console.print(f"\n[dim]Stats:[/dim]")
-            console.print(f"  Words: {metadata.get('word_count', 'N/A')}")
-            console.print(f"  Reading time: {metadata.get('reading_time_minutes', 'N/A')} min")
-            console.print(f"  Sections: {metadata.get('section_count', 'N/A')}")
+            console.print(f"\n[bold]Stats:[/bold]")
+            console.print(f"  📝 Words: {metadata.get('word_count', 'N/A')}")
+            console.print(f"  ⏱️  Reading time: {metadata.get('reading_time_minutes', 'N/A')} min")
+            console.print(f"  📑 Sections: {metadata.get('section_count', 'N/A')}")
 
     except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted. Job saved for resume.[/yellow]")
-        console.print(f"Resume with: python -m src.agent resume {job_id}")
+        console.print("\n[yellow]⚠️  Interrupted. Job saved for resume.[/yellow]")
+        console.print(f"Resume with: [bold]python -m src.agent resume {job_id}[/bold]")
         sys.exit(130)
     except Exception as e:
-        console.print(f"\n[bold red]Error:[/bold red] {e}")
+        console.print(f"\n[bold red]❌ Error:[/bold red] {e}")
         sys.exit(1)
 
 
@@ -109,52 +181,105 @@ def resume(job_id: str):
 
 
 async def _run_resume(job_id: str):
-    """Resume a job from saved state."""
+    """Resume a job from saved state with real-time progress updates."""
     job_manager = JobManager()
 
     # Load state
     state = job_manager.load_state(job_id)
     if state is None:
-        console.print(f"[bold red]Job not found:[/bold red] {job_id}")
+        console.print(f"[bold red]❌ Job not found:[/bold red] {job_id}")
         sys.exit(1)
 
     current_phase = state.get("current_phase", "")
-    console.print(f"\n[bold blue]Resuming Job[/bold blue]")
-    console.print(f"Job ID: {job_id}")
-    console.print(f"Current phase: {current_phase}\n")
+    console.print(f"\n[bold blue]🔄 Resuming Job[/bold blue]")
+    console.print(f"[dim]Job ID:[/dim] {job_id}")
+    console.print(f"[dim]Current phase:[/dim] {current_phase}\n")
 
     if current_phase == Phase.DONE.value:
-        console.print("[green]Job already complete.[/green]")
+        console.print("[green]✅ Job already complete.[/green]")
         job_dir = job_manager.get_job_dir(job_id)
-        console.print(f"Output: {job_dir / 'final.md'}")
+        console.print(f"[dim]Output:[/dim] {job_dir / 'final.md'}")
         return
 
     if current_phase == Phase.FAILED.value:
-        console.print("[yellow]Job previously failed. Restarting from beginning.[/yellow]")
+        console.print("[yellow]⚠️  Job previously failed. Restarting from beginning.[/yellow]")
         state["current_phase"] = Phase.TOPIC_DISCOVERY.value
         state["current_section_index"] = 0
 
     try:
-        # Build and run graph
+        # Build graph
         graph = build_blog_agent_graph()
-        result = await graph.ainvoke(state)
 
-        final_phase = result.get("current_phase", "")
+        # Track state for progress display
+        last_phase = None
+        last_section_idx = state.get("current_section_index", 0)
+        result = state
 
-        if final_phase == Phase.FAILED.value:
-            console.print(f"\n[bold red]Generation failed:[/bold red]")
-            console.print(f"  {result.get('error_message', 'Unknown error')}")
-            sys.exit(1)
+        # Stream through graph execution
+        with Status("[bold blue]Resuming...", console=console) as status:
+            async for event in graph.astream(state):
+                # event is a dict with node name as key
+                for node_name, node_output in event.items():
+                    result = {**result, **node_output}
+
+                    current_phase = result.get("current_phase", "")
+                    section_idx = result.get("current_section_index", 0)
+
+                    # Update status based on phase changes
+                    if current_phase != last_phase:
+                        if last_phase:
+                            console.print(f"  [green]✓[/green] {last_phase.replace('_', ' ').title()} complete")
+
+                        status.update(_get_phase_message(current_phase))
+                        last_phase = current_phase
+
+                    # Special handling for writing phase
+                    elif current_phase == "writing" and section_idx != last_section_idx:
+                        plan = result.get("plan", {})
+                        sections = [s for s in plan.get("sections", []) if not s.get("optional")]
+                        total = len(sections)
+
+                        if section_idx > 0 and section_idx <= total:
+                            prev_section = sections[section_idx - 1] if section_idx > 0 else None
+                            if prev_section:
+                                section_title = prev_section.get("title") or prev_section.get("role", "Section")
+                                console.print(f"    [green]✓[/green] {section_title}")
+
+                        if section_idx < total:
+                            next_section = sections[section_idx]
+                            section_title = next_section.get("title") or next_section.get("role", "Section")
+                            status.update(f"✍️  Writing section {section_idx + 1}/{total}: {section_title}...")
+
+                        last_section_idx = section_idx
+
+                    # Check for failure
+                    if current_phase == Phase.FAILED.value:
+                        status.stop()
+                        console.print(f"\n[bold red]❌ Generation failed:[/bold red]")
+                        console.print(f"   {result.get('error_message', 'Unknown error')}")
+                        sys.exit(1)
+
+            # Final phase completion message
+            if last_phase and last_phase != Phase.FAILED.value:
+                console.print(f"  [green]✓[/green] {last_phase.replace('_', ' ').title()} complete")
 
         job_dir = job_manager.get_job_dir(job_id)
-        console.print(f"\n[bold green]Blog generated successfully![/bold green]")
-        console.print(f"Output: {job_dir / 'final.md'}")
+        console.print(f"\n[bold green]✅ Blog generated successfully![/bold green]")
+        console.print(f"[dim]Output:[/dim] {job_dir / 'final.md'}")
+
+        # Show stats
+        metadata = result.get("metadata", {})
+        if metadata:
+            console.print(f"\n[bold]Stats:[/bold]")
+            console.print(f"  📝 Words: {metadata.get('word_count', 'N/A')}")
+            console.print(f"  ⏱️  Reading time: {metadata.get('reading_time_minutes', 'N/A')} min")
+            console.print(f"  📑 Sections: {metadata.get('section_count', 'N/A')}")
 
     except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted. Job saved for resume.[/yellow]")
+        console.print("\n[yellow]⚠️  Interrupted. Job saved for resume.[/yellow]")
         sys.exit(130)
     except Exception as e:
-        console.print(f"\n[bold red]Error:[/bold red] {e}")
+        console.print(f"\n[bold red]❌ Error:[/bold red] {e}")
         sys.exit(1)
 
 

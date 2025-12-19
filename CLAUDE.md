@@ -20,6 +20,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 8. **Run integration tests with real data** - After implementing a feature, run integration tests with actual LLM calls. Show the raw output, analyze the results, and display a summary report at the end of the implementation.
 
+9. **Add pip packages to pyproject.toml** - When installing a new pip package, always add it to pyproject.toml under `[project.dependencies]` to keep dependencies tracked and reproducible.
+
 ## Project Overview
 
 Blog Agent - An AI-powered technical blog writer that generates publication-ready markdown from a title and context. Uses Python + LangGraph with Google Gemini (Flash/Flash-Lite models).

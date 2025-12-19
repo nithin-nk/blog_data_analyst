@@ -11,7 +11,7 @@ Set environment variable SKIP_EXPENSIVE_TESTS=1 to skip.
 import os
 import pytest
 from click.testing import CliRunner
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from src.agent.__main__ import cli
 from src.agent.state import Phase
@@ -30,14 +30,21 @@ def runner():
     return CliRunner()
 
 
+def create_mock_astream(final_state):
+    """Create a mock astream that yields the final state."""
+    async def mock_astream(_state):
+        yield {"final_node": final_state}
+    return mock_astream
+
+
 class TestStartIntegration:
     """Integration tests for the start command."""
 
     @pytest.fixture
     def mock_graph(self):
-        """Create mock graph that simulates successful completion."""
+        """Create mock graph that simulates successful completion via streaming."""
         mock = MagicMock()
-        mock.ainvoke = AsyncMock(return_value={
+        final_state = {
             "current_phase": Phase.REVIEWING.value,
             "final_markdown": "# Test Blog\n\nContent here.",
             "metadata": {
@@ -45,7 +52,8 @@ class TestStartIntegration:
                 "reading_time_minutes": 2,
                 "section_count": 3,
             },
-        })
+        }
+        mock.astream = create_mock_astream(final_state)
         return mock
 
     def test_start_with_mocked_graph(self, runner, tmp_path, mock_graph):
@@ -95,7 +103,7 @@ class TestStartIntegration:
     def test_start_handles_failure(self, runner, tmp_path):
         """Start command handles graph failure gracefully."""
         mock_graph = MagicMock()
-        mock_graph.ainvoke = AsyncMock(return_value={
+        mock_graph.astream = create_mock_astream({
             "current_phase": Phase.FAILED.value,
             "error_message": "Test error",
         })
@@ -152,7 +160,7 @@ class TestResumeIntegration:
     def test_resume_continues_from_writing(self, runner, tmp_path):
         """Resume continues from writing phase."""
         mock_graph = MagicMock()
-        mock_graph.ainvoke = AsyncMock(return_value={
+        mock_graph.astream = create_mock_astream({
             "current_phase": Phase.REVIEWING.value,
         })
 
@@ -174,7 +182,6 @@ class TestResumeIntegration:
             result = runner.invoke(cli, ["resume", "test-job"])
 
             assert result.exit_code == 0
-            mock_graph.ainvoke.assert_called_once()
 
 
 class TestJobsIntegration:
@@ -243,8 +250,7 @@ class TestEndToEnd:
     """End-to-end tests with real graph execution."""
 
     @skip_expensive
-    @pytest.mark.asyncio
-    async def test_full_cli_run(self, runner, tmp_path):
+    def test_full_cli_run(self, runner, tmp_path):
         """Full CLI run from start to completion."""
         from src.agent.state import JobManager
 
