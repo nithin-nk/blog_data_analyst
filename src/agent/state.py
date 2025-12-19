@@ -136,6 +136,10 @@ class PlanSection(BaseModel):
         description="Whether section needs a diagram",
     )
     target_words: int = Field(default=200, description="Target word count")
+    optional: bool = Field(
+        default=False,
+        description="If true, this is an extra topic the user can choose to include or skip",
+    )
 
 
 class BlogPlan(BaseModel):

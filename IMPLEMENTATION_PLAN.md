@@ -84,7 +84,7 @@ Additional files:
 
 ---
 
-### Phase 4: Planning (Phase 1)
+### Phase 4: Planning (Phase 1) - COMPLETED
 **Goal**: Generate blog outline with sections
 
 1. Implement `planning_node(state)` in `nodes.py`:
@@ -95,6 +95,14 @@ Additional files:
 **Integration Test**: `test_planning.py`
 - Test generates plan with 5-6 sections
 - Test each section has required fields
+
+**Implementation Notes**:
+- Model used: `gemini-2.5-flash-lite`
+- Uses `langchain-google-genai` with structured output (BlogPlan Pydantic model)
+- Helper functions: `_format_topic_context_snippets`, `_build_planning_prompt`, `_generate_blog_plan`
+- TARGET_WORDS_MAP: {"short": 800, "medium": 1500, "long": 2500}
+- API key rotation on 429 errors via KeyManager
+- 26 unit tests + 7 integration tests all passing
 
 ---
 
@@ -109,7 +117,7 @@ Additional files:
 2. Implement `validate_sources_node(state)`:
    - Call Gemini Flash-Lite to filter sources
    - Keep sources where `use=true`
-   - Ensure min 2 sources per section
+   - Ensure min 4 sources per section
 
 **Integration Test**: `test_research.py`
 - Test fetches content from multiple URLs
@@ -324,6 +332,10 @@ blog_data_analyst/
 
 ## Next Steps
 
-1. Start with **Phase 1: Foundation** - create directory structure and implement `tools.py`
-2. After each phase, run integration tests before moving to next
-3. Build incrementally, testing as we go
+1. ~~Start with **Phase 1: Foundation** - create directory structure and implement `tools.py`~~ DONE
+2. ~~**Phase 2: State + Checkpoints** - State schema and job management~~ DONE
+3. ~~**Phase 3: Topic Discovery** - Generate search queries and gather topic context~~ DONE
+4. ~~**Phase 4: Planning** - Generate blog outline with sections~~ DONE
+5. **Phase 5: Research** - Fetch and validate sources for each section
+6. After each phase, run integration tests before moving to next
+7. Build incrementally, testing as we go
