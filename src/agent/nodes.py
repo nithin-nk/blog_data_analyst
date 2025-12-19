@@ -1128,3 +1128,366 @@ async def validate_sources_node(state: BlogAgentState) -> dict[str, Any]:
             "current_phase": Phase.FAILED.value,
             "error_message": f"Unexpected error: {e}",
         }
+
+
+# =============================================================================
+# Write Section Node (Phase 3)
+# =============================================================================
+
+
+def _format_sources_for_prompt(sources: list[dict], max_sources: int = 5) -> str:
+    """
+    Format validated sources for inclusion in writer prompt.
+
+    Args:
+        sources: List of source dicts with url, title, content
+        max_sources: Maximum number of sources to include
+
+    Returns:
+        Formatted string with source content for the prompt
+    """
+    if not sources:
+        return "No research sources available. Write based on your knowledge."
+
+    formatted = []
+    for i, source in enumerate(sources[:max_sources], 1):
+        title = source.get("title", "Untitled")
+        url = source.get("url", "")
+        content = source.get("content", "")[:2000]  # Limit content length
+
+        formatted.append(f"""
+Source {i}: [{title}]({url})
+{content}
+""")
+
+    return "\n---\n".join(formatted)
+
+
+def _get_previous_sections_text(
+    section_drafts: dict[str, str],
+    sections: list[dict],
+) -> str:
+    """
+    Get text from previously written sections for context.
+
+    Args:
+        section_drafts: Dict of section_id -> markdown content
+        sections: List of section dicts (in order)
+
+    Returns:
+        Concatenated text from previous sections
+    """
+    if not section_drafts or not sections:
+        return ""
+
+    previous_text = []
+    for section in sections:
+        section_id = section.get("id", "")
+        if section_id in section_drafts:
+            title = section.get("title") or section.get("role", "Section")
+            content = section_drafts[section_id]
+            previous_text.append(f"## {title}\n\n{content}")
+
+    return "\n\n".join(previous_text)
+
+
+def _build_writer_prompt(
+    section: dict,
+    sources: list[dict],
+    previous_sections_text: str,
+    style_guide: str,
+    blog_title: str,
+) -> str:
+    """
+    Build the writer prompt for a section.
+
+    Args:
+        section: Section dict with id, title, role, target_words, needs_code, needs_diagram
+        sources: List of validated sources for this section
+        previous_sections_text: Text from previously written sections
+        style_guide: Writing style guidelines
+        blog_title: Title of the blog post
+
+    Returns:
+        Complete prompt string for section writing
+    """
+    section_title = section.get("title") or section.get("id", "Section")
+    section_role = section.get("role", "")
+    target_words = section.get("target_words", 200)
+    needs_code = section.get("needs_code", False)
+    needs_diagram = section.get("needs_diagram", False)
+
+    formatted_sources = _format_sources_for_prompt(sources)
+
+    # Build role-specific instructions
+    role_instructions = ""
+    if section_role == "hook":
+        role_instructions = """
+This is the HOOK section. Your goal is to grab the reader's attention immediately.
+- Start with a surprising stat, a provocative question, or a relatable problem
+- Do NOT use a title/heading for this section
+- Keep it punchy and intriguing (2-3 paragraphs max)
+"""
+    elif section_role == "problem":
+        role_instructions = """
+This is the PROBLEM section. Clearly explain what's broken with current approaches.
+- Describe the pain points engineers face
+- Use specific, relatable examples
+- Create urgency for finding a solution
+"""
+    elif section_role == "why":
+        role_instructions = """
+This is the WHY section. Explain why the new approach matters.
+- Connect the solution to the problems described earlier
+- Highlight the key benefits
+- Set up the reader for the implementation details
+"""
+    elif section_role in ["implementation", "deep_dive"]:
+        role_instructions = """
+This is a DEEP DIVE / IMPLEMENTATION section. Provide technical depth.
+- Include working code examples with imports
+- Explain the "why" behind technical decisions
+- Be specific with tool names, config options, and commands
+"""
+    elif section_role == "conclusion":
+        role_instructions = """
+This is the CONCLUSION section. Provide actionable takeaways.
+- Summarize the key points (don't just repeat)
+- Give the reader clear next steps
+- End with a memorable thought or call-to-action
+"""
+
+    # Code/diagram requirements
+    requirements = []
+    if needs_code:
+        requirements.append("- MUST include working code examples with imports")
+    if needs_diagram:
+        requirements.append("- MUST include a mermaid diagram (```mermaid\\n...\\n```)")
+    requirements_text = "\n".join(requirements) if requirements else "- No special requirements"
+
+    prompt = f"""You are writing a section for a technical blog post.
+
+## Blog Title
+"{blog_title}"
+
+## Section to Write
+Title: "{section_title}"
+Role: {section_role}
+Target word count: ~{target_words} words (±20%)
+
+{role_instructions}
+
+## Writing Style Guide
+{style_guide}
+
+## Requirements
+{requirements_text}
+
+## Research Sources
+Use these sources for accurate, up-to-date information:
+{formatted_sources}
+
+## Previously Written Sections
+{previous_sections_text if previous_sections_text else "(This is the first section)"}
+
+## Instructions
+Write the "{section_title}" section now. Output ONLY the section content in markdown format.
+Do not include the section title as a heading (it will be added automatically).
+Focus on delivering value to the reader with specific, actionable content."""
+
+    return prompt
+
+
+async def _write_section(
+    section: dict,
+    sources: list[dict],
+    previous_sections_text: str,
+    blog_title: str,
+    key_manager: KeyManager,
+    max_retries: int = 3,
+) -> str:
+    """
+    Write a single section using Gemini Flash.
+
+    Args:
+        section: Section dict with id, title, role, etc.
+        sources: List of validated sources for this section
+        previous_sections_text: Text from previously written sections
+        blog_title: Title of the blog post
+        key_manager: KeyManager for API key rotation
+        max_retries: Maximum retry attempts
+
+    Returns:
+        Generated markdown content for the section
+
+    Raises:
+        RuntimeError: If all API keys exhausted or max retries exceeded
+    """
+    from .config import LLM_MODEL_FULL, LLM_TEMPERATURE_MEDIUM, STYLE_GUIDE
+
+    prompt = _build_writer_prompt(
+        section=section,
+        sources=sources,
+        previous_sections_text=previous_sections_text,
+        style_guide=STYLE_GUIDE,
+        blog_title=blog_title,
+    )
+
+    last_error = None
+
+    for attempt in range(max_retries):
+        api_key = key_manager.get_best_key()
+
+        try:
+            llm = ChatGoogleGenerativeAI(
+                model=LLM_MODEL_FULL,
+                google_api_key=api_key,
+                temperature=LLM_TEMPERATURE_MEDIUM,
+            )
+
+            # Invoke (run in thread pool since langchain may be sync internally)
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, lambda: llm.invoke(prompt)
+            )
+
+            # Extract content from AIMessage
+            content = result.content if hasattr(result, "content") else str(result)
+
+            # Record usage
+            key_manager.record_usage(
+                api_key,
+                tokens_in=len(prompt) // 4,
+                tokens_out=len(content) // 4,
+            )
+
+            section_id = section.get("id", "unknown")
+            logger.info(f"Successfully wrote section '{section_id}' ({len(content.split())} words)")
+
+            return content
+
+        except Exception as e:
+            error_str = str(e).lower()
+            last_error = e
+
+            if "429" in str(e) or "quota" in error_str or "resource" in error_str:
+                logger.warning("Rate limited on key, rotating...")
+                key_manager.mark_rate_limited(api_key)
+
+                next_key = key_manager.get_next_key(api_key)
+                if next_key is None:
+                    raise RuntimeError("All API keys exhausted or rate-limited")
+                continue
+
+            logger.error(f"Section writing attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2**attempt)
+
+    raise RuntimeError(f"Failed to write section after {max_retries} attempts: {last_error}")
+
+
+async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
+    """
+    Phase 3: Write Section Node.
+
+    Writes ONE section per invocation. The graph router controls looping
+    through all sections.
+
+    Args:
+        state: Current BlogAgentState containing:
+            - plan: BlogPlan with sections
+            - validated_sources: Dict of section_id -> sources
+            - current_section_index: Index of section to write
+            - section_drafts: Dict of section_id -> content (previous sections)
+            - job_id: Job identifier for checkpointing
+
+    Returns:
+        State update dict with:
+        - section_drafts: Updated with new section content
+        - current_section_index: Incremented for next section
+        - current_phase: Stays WRITING (graph controls phase transition)
+    """
+    logger.info("Starting write section node")
+
+    plan = state.get("plan", {})
+    sections = plan.get("sections", [])
+    validated_sources = state.get("validated_sources", {})
+    current_idx = state.get("current_section_index", 0)
+    section_drafts = dict(state.get("section_drafts", {}))
+    job_id = state.get("job_id", "")
+    blog_title = plan.get("blog_title", state.get("title", ""))
+
+    # Filter to required (non-optional) sections
+    required_sections = [s for s in sections if not s.get("optional")]
+
+    if current_idx >= len(required_sections):
+        logger.info("All sections written, moving to assembly")
+        return {
+            "current_section_index": current_idx,
+            "section_drafts": section_drafts,
+            "current_phase": Phase.ASSEMBLING.value,
+        }
+
+    section = required_sections[current_idx]
+    section_id = section.get("id", f"section_{current_idx}")
+    section_title = section.get("title") or section.get("role", "Section")
+
+    logger.info(f"Writing section {current_idx + 1}/{len(required_sections)}: {section_title}")
+
+    try:
+        key_manager = KeyManager.from_env()
+
+        # Get sources for this section
+        sources = validated_sources.get(section_id, [])
+
+        # Get previous sections for context
+        previous_text = _get_previous_sections_text(section_drafts, required_sections[:current_idx])
+
+        # Write the section
+        content = await _write_section(
+            section=section,
+            sources=sources,
+            previous_sections_text=previous_text,
+            blog_title=blog_title,
+            key_manager=key_manager,
+        )
+
+        # Save to section_drafts
+        section_drafts[section_id] = content
+
+        # Save checkpoint
+        if job_id:
+            job_manager = JobManager()
+            drafts_dir = job_manager.get_job_dir(job_id) / "drafts" / "sections"
+            drafts_dir.mkdir(parents=True, exist_ok=True)
+            (drafts_dir / f"{section_id}.md").write_text(content)
+
+            job_manager.save_state(
+                job_id,
+                {
+                    "current_phase": Phase.WRITING.value,
+                    "current_section_index": current_idx + 1,
+                    "section_drafts": section_drafts,
+                },
+            )
+
+        logger.info(f"Section '{section_title}' written successfully ({len(content.split())} words)")
+
+        return {
+            "section_drafts": section_drafts,
+            "current_section_index": current_idx + 1,
+            "current_phase": Phase.WRITING.value,
+        }
+
+    except RuntimeError as e:
+        logger.error(f"Section writing failed: {e}")
+        return {
+            "current_phase": Phase.FAILED.value,
+            "error_message": str(e),
+        }
+    except Exception as e:
+        logger.error(f"Unexpected error in section writing: {e}")
+        return {
+            "current_phase": Phase.FAILED.value,
+            "error_message": f"Unexpected error: {e}",
+        }

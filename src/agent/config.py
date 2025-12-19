@@ -20,3 +20,17 @@ TARGET_WORDS_MAP = {
     "medium": 1500,
     "long": 2500,
 }
+
+# Writing style guide
+STYLE_GUIDE = """
+Write in a direct, technical style for experienced engineers.
+- Open with a clear problem statement, no warm-up.
+- Be opinionated. Say "you need X" not "you might consider".
+- Keep paragraphs short (2-4 sentences).
+- Use bullet points only for listing items.
+- Include specific tool names and real config examples.
+- No fluff: "In today's world", "It's worth noting that".
+- Address the reader as "you".
+- Code: Python preferred, include imports, be runnable.
+- YAML for configuration examples.
+"""
