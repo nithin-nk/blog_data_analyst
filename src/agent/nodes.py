@@ -1491,3 +1491,178 @@ async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
             "current_phase": Phase.FAILED.value,
             "error_message": f"Unexpected error: {e}",
         }
+
+
+# =============================================================================
+# Final Assembly Node (Phase 4)
+# =============================================================================
+
+
+def _combine_sections(
+    section_drafts: dict[str, str],
+    plan: dict,
+    blog_title: str,
+) -> str:
+    """
+    Combine all section drafts into a single markdown document.
+
+    Args:
+        section_drafts: Dict of section_id -> markdown content
+        plan: Blog plan with sections list
+        blog_title: Title of the blog post
+
+    Returns:
+        Combined markdown with H1 title and H2 section headers
+    """
+    sections = plan.get("sections", [])
+
+    # Filter to required (non-optional) sections in order
+    required_sections = [s for s in sections if not s.get("optional")]
+
+    combined_parts = []
+
+    # Add H1 title
+    combined_parts.append(f"# {blog_title}\n")
+
+    for section in required_sections:
+        section_id = section.get("id", "")
+        section_role = section.get("role", "")
+        section_title = section.get("title")
+
+        content = section_drafts.get(section_id, "")
+        if not content:
+            logger.warning(f"No content found for section {section_id}")
+            continue
+
+        # Hook section: no header, just content
+        if section_role == "hook":
+            combined_parts.append(content)
+        else:
+            # Other sections: add H2 header
+            header = section_title or section_id.replace("_", " ").title()
+            combined_parts.append(f"## {header}\n\n{content}")
+
+    return "\n\n".join(combined_parts)
+
+
+def _calculate_reading_time(text: str, words_per_minute: int = 200) -> int:
+    """
+    Calculate estimated reading time in minutes.
+
+    Args:
+        text: The text to measure
+        words_per_minute: Reading speed (default 200 wpm)
+
+    Returns:
+        Reading time in minutes (minimum 1)
+    """
+    word_count = len(text.split())
+    minutes = max(1, round(word_count / words_per_minute))
+    return minutes
+
+
+def _count_words(text: str) -> int:
+    """Count words in text."""
+    return len(text.split())
+
+
+async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
+    """
+    Phase 4: Final Assembly Node.
+
+    Combines all section drafts into a single markdown document.
+    In this minimal version:
+    - No final critic
+    - No mermaid rendering
+    - No citations
+    - Just combines and saves
+
+    Args:
+        state: Current BlogAgentState containing:
+            - plan: BlogPlan with sections
+            - section_drafts: Dict of section_id -> content
+            - job_id: Job identifier for checkpointing
+
+    Returns:
+        State update dict with:
+        - combined_draft: Full blog markdown
+        - final_markdown: Same as combined_draft (no refinement yet)
+        - metadata: Basic metadata (word_count, reading_time)
+        - current_phase: Updated to REVIEWING
+    """
+    logger.info("Starting final assembly")
+
+    plan = state.get("plan", {})
+    section_drafts = state.get("section_drafts", {})
+    job_id = state.get("job_id", "")
+    blog_title = plan.get("blog_title", state.get("title", "Untitled"))
+
+    if not section_drafts:
+        logger.error("No section drafts to assemble")
+        return {
+            "current_phase": Phase.FAILED.value,
+            "error_message": "No section drafts to assemble",
+        }
+
+    try:
+        # Combine sections into single document
+        combined_draft = _combine_sections(
+            section_drafts=section_drafts,
+            plan=plan,
+            blog_title=blog_title,
+        )
+
+        # Calculate basic metadata
+        word_count = _count_words(combined_draft)
+        reading_time = _calculate_reading_time(combined_draft)
+
+        metadata = {
+            "blog_title": blog_title,
+            "word_count": word_count,
+            "reading_time_minutes": reading_time,
+            "section_count": len([s for s in plan.get("sections", []) if not s.get("optional")]),
+        }
+
+        logger.info(f"Assembled blog: {word_count} words, {reading_time} min read")
+
+        # Save checkpoint
+        if job_id:
+            job_manager = JobManager()
+            job_dir = job_manager.get_job_dir(job_id)
+
+            # Save combined draft
+            drafts_dir = job_dir / "drafts"
+            drafts_dir.mkdir(parents=True, exist_ok=True)
+            (drafts_dir / "v1.md").write_text(combined_draft)
+
+            # Save final.md
+            (job_dir / "final.md").write_text(combined_draft)
+
+            # Save metadata
+            import json
+            (job_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
+
+            # Update state
+            job_manager.save_state(
+                job_id,
+                {
+                    "current_phase": Phase.REVIEWING.value,
+                    "combined_draft": combined_draft,
+                    "final_markdown": combined_draft,
+                    "metadata": metadata,
+                },
+            )
+
+        return {
+            "combined_draft": combined_draft,
+            "final_markdown": combined_draft,
+            "metadata": metadata,
+            "current_phase": Phase.REVIEWING.value,
+        }
+
+    except Exception as e:
+        logger.error(f"Final assembly failed: {e}")
+        return {
+            "current_phase": Phase.FAILED.value,
+            "error_message": f"Final assembly failed: {e}",
+        }

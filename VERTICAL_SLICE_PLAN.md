@@ -78,7 +78,7 @@ async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
 
 ### Slice 6.2: Basic Assembly
 
-**Status**: ○ PENDING
+**Status**: ✓ COMPLETE
 
 **Files to modify**:
 - `src/agent/nodes.py` - Add assembly functions
