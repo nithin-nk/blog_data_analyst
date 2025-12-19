@@ -12,6 +12,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 4. **Do the right thing** - No shortcuts. Follow best practices, write clean code, and maintain the established patterns in the codebase.
 
+5. **Keep plans concise** - Plans should be short and to the point. No fluff. Skip code details and use bulleted points to explain how each task will be accomplished.
+
 ## Project Overview
 
 Blog Agent - An AI-powered technical blog writer that generates publication-ready markdown from a title and context. Uses Python + LangGraph with Google Gemini (Flash/Flash-Lite models).
