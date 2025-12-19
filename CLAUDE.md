@@ -16,12 +16,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Blog Agent - An AI-powered technical blog writer that generates publication-ready markdown from a title and context. Uses Python + LangGraph with Google Gemini (Flash/Flash-Lite models).
 
-## Commands
+## Environment Setup
+
+**IMPORTANT:** This project uses a Python virtual environment. All commands must be run with the venv activated or using the venv Python directly.
 
 ```bash
-# Install dependencies
+# Create virtual environment (first time only)
+python -m venv .venv
+
+# Activate virtual environment
+source .venv/bin/activate
+
+# Install dependencies (after activation)
 pip install langgraph duckduckgo-search trafilatura httpx rich click python-dotenv langchain-google-genai pydantic
 
+# Or install from pyproject.toml if available
+pip install -e .
+```
+
+The virtual environment is located at `.venv/` in the project root.
+
+## Commands
+
+**All commands below assume the virtual environment is activated, or prefix with `.venv/bin/`**
+
+```bash
 # Run the agent
 python -m src.agent start --title "Topic Title" --context "Notes and context" --length medium
 
@@ -31,11 +50,14 @@ python -m src.agent resume <job_id>
 # List jobs
 python -m src.agent jobs [--status complete|incomplete]
 
-# Run tests
-pytest tests/unit/                    # Fast unit tests (mocked)
-pytest tests/integration/             # Integration tests (needs API keys)
-pytest tests/unit/test_tools.py -v    # Single test file
-pytest -k "test_search"               # Run tests matching pattern
+# Run tests (use PYTHONPATH=. to ensure src module is found)
+PYTHONPATH=. pytest tests/unit/                    # Fast unit tests (mocked)
+PYTHONPATH=. pytest tests/integration/             # Integration tests (needs API keys)
+PYTHONPATH=. pytest tests/unit/test_tools.py -v    # Single test file
+PYTHONPATH=. pytest -k "test_search"               # Run tests matching pattern
+
+# Alternative: run tests using venv directly without activation
+PYTHONPATH=. .venv/bin/pytest tests/unit/
 ```
 
 ## Architecture
