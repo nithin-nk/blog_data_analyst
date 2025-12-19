@@ -18,7 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 7. **Mark completed implementation plans** - Update IMPLEMENTATION_PLAN.md to mark tasks/phases as completed when they are done.
 
-8. **Run integration tests with real data** - After implementing a feature, run integration tests with actual LLM calls. Show the raw output, analyze the results, and display a summary report at the end of the implementation.
+8. **Test comprehensively** - Write unit tests (fully mocked) and integration tests (mocked LLM outputs with real tools like web search/fetching). Integration tests should use mocked LLM responses to avoid API quota issues and ensure deterministic testing.
 
 9. **Add pip packages to pyproject.toml** - When installing a new pip package, always add it to pyproject.toml under `[project.dependencies]` to keep dependencies tracked and reproducible.
 
@@ -62,12 +62,43 @@ python -m src.agent jobs [--status complete|incomplete]
 
 # Run tests (use PYTHONPATH=. to ensure src module is found)
 PYTHONPATH=. pytest tests/unit/                    # Fast unit tests (mocked)
+PYTHONPATH=. pytest tests/unit/ -n auto            # Run tests in parallel using all CPU cores
 PYTHONPATH=. pytest tests/integration/             # Integration tests (needs API keys)
 PYTHONPATH=. pytest tests/unit/test_tools.py -v    # Single test file
 PYTHONPATH=. pytest -k "test_search"               # Run tests matching pattern
 
 # Alternative: run tests using venv directly without activation
 PYTHONPATH=. .venv/bin/pytest tests/unit/
+PYTHONPATH=. .venv/bin/pytest tests/unit/ -n auto  # Parallel execution
+```
+
+## Testing Strategy
+
+### Unit Tests (`tests/unit/`)
+- **Fully mocked** - All external dependencies (LLM, web requests) are mocked
+- **Fast execution** - Run in < 5 seconds total
+- **Deterministic** - Same input always produces same output
+- **No API keys required** - Can run offline
+
+### Integration Tests (`tests/integration/`)
+- **Mocked LLM responses** - Use `unittest.mock` to return predefined LLM outputs
+- **Real tools** - Web search (DuckDuckGo) and content fetching run against real URLs
+- **Avoid API quota** - Mock LLM calls to prevent hitting free tier limits (20 requests/day per project)
+- **Test flows** - Verify node transitions, state updates, and error handling
+
+**Example mocked integration test pattern:**
+```python
+@pytest.mark.asyncio
+async def test_validation_with_mocked_llm():
+    with patch("src.agent.nodes.ChatGoogleGenerativeAI") as mock_llm_class:
+        mock_llm = MagicMock()
+        mock_structured = MagicMock()
+        mock_structured.invoke.return_value = SourceValidationList(sources=[...])
+        mock_llm.with_structured_output.return_value = mock_structured
+        mock_llm_class.return_value = mock_llm
+
+        # Test runs with mocked LLM, real web fetching
+        result = await validate_sources_node(state)
 ```
 
 ## Architecture
@@ -134,7 +165,11 @@ GOOGLE_API_KEY_4=...
 GOOGLE_API_KEY_5=...
 ```
 
-KeyManager rotates keys on 429 errors and tracks usage per key.
+**Key Management:**
+- KeyManager rotates keys on 429 (RESOURCE_EXHAUSTED) errors and tracks usage per key
+- **Free tier limits:** 20 requests/day per model per project for `gemini-2.5-flash-lite`
+- **Best practice:** Use keys from different Google Cloud projects (even under same account) to multiply quota
+- Keys are marked as rate-limited when quota exceeded and automatically reset daily
 
 ## Key Design Documents
 

@@ -242,7 +242,7 @@ python -m src.agent start --title "Semantic Caching" --context "Redis, GPTCache"
 
 ### Slice 6.5: Section Critic
 
-**Status**: ○ PENDING
+**Status**: ✓ COMPLETE
 
 **Files to modify**:
 - `src/agent/state.py` - Expand CriticScore to 8 dimensions
@@ -750,7 +750,7 @@ async def _re_research_section(section, key_manager) -> list[dict]:
 | 6.2 | Basic Assembly | test_assembly.py | test_assembly_integration.py | ✓ |
 | 6.3 | Graph + Routing | test_graph.py | test_full_graph.py | ✓ |
 | 6.4 | CLI Start Command | test_cli.py | test_cli_integration.py | ✓ |
-| 6.5 | Section Critic | test_writing.py | test_writing_integration.py | ○ |
+| 6.5 | Section Critic | test_writing.py | test_writing_integration.py | ✓ |
 | 6.6 | Section Refine Loop | test_writing.py | test_writing_integration.py | ○ |
 | 6.7 | Final Critic | test_assembly.py | test_assembly_integration.py | ○ |
 | 6.8 | Basic Human Review | test_graph.py | Manual | ○ |

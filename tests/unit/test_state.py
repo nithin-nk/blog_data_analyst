@@ -162,9 +162,12 @@ class TestCriticScore:
         scores = CriticScore(
             technical_accuracy=8,
             completeness=9,
+            code_quality=8,
             clarity=7,
             voice=8,
             originality=9,
+            length=8,
+            diagram_quality=10,
         )
         assert scores.technical_accuracy == 8
 
@@ -174,9 +177,12 @@ class TestCriticScore:
             CriticScore(
                 technical_accuracy=0,
                 completeness=8,
+                code_quality=8,
                 clarity=8,
                 voice=8,
                 originality=8,
+                length=8,
+                diagram_quality=10,
             )
 
     def test_score_above_max_fails(self):
@@ -185,9 +191,12 @@ class TestCriticScore:
             CriticScore(
                 technical_accuracy=11,
                 completeness=8,
+                code_quality=8,
                 clarity=8,
                 voice=8,
                 originality=8,
+                length=8,
+                diagram_quality=10,
             )
 
     def test_boundary_scores_valid(self):
@@ -195,9 +204,12 @@ class TestCriticScore:
         scores = CriticScore(
             technical_accuracy=1,
             completeness=10,
+            code_quality=5,
             clarity=1,
             voice=10,
             originality=5,
+            length=10,
+            diagram_quality=10,
         )
         assert scores.technical_accuracy == 1
         assert scores.completeness == 10
@@ -212,9 +224,12 @@ class TestSectionCriticResult:
             scores=CriticScore(
                 technical_accuracy=9,
                 completeness=8,
+                code_quality=9,
                 clarity=9,
                 voice=8,
                 originality=9,
+                length=8,
+                diagram_quality=10,
             ),
             overall_pass=True,
             issues=[],
@@ -225,16 +240,34 @@ class TestSectionCriticResult:
 
     def test_failing_result_with_issues(self):
         """Failing result with issues."""
+        from src.agent.state import CriticIssue
+
         result = SectionCriticResult(
             scores=CriticScore(
                 technical_accuracy=5,
                 completeness=6,
+                code_quality=6,
                 clarity=5,
                 voice=6,
                 originality=4,
+                length=7,
+                diagram_quality=10,
             ),
             overall_pass=False,
-            issues=["Lacks technical depth", "Missing code examples"],
+            issues=[
+                CriticIssue(
+                    dimension="technical_accuracy",
+                    location="paragraph 2",
+                    problem="Lacks technical depth",
+                    suggestion="Add more technical details",
+                ),
+                CriticIssue(
+                    dimension="originality",
+                    location="overall",
+                    problem="Missing code examples",
+                    suggestion="Add code examples",
+                ),
+            ],
             fact_check_needed=["Claim about 50% performance improvement"],
         )
         assert result.overall_pass is False

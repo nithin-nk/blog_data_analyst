@@ -15,9 +15,11 @@ from src.agent.nodes import (
     _format_sources_for_prompt,
     _get_previous_sections_text,
     _build_writer_prompt,
+    _build_critic_prompt,
+    _critic_section,
     write_section_node,
 )
-from src.agent.state import Phase
+from src.agent.state import CriticIssue, CriticScore, Phase, SectionCriticResult
 
 
 class TestFormatSourcesForPrompt:
@@ -305,20 +307,39 @@ class TestWriteSectionNode:
         mock_response = MagicMock()
         mock_response.content = "Generated hook content here."
 
+        mock_critic_result = SectionCriticResult(
+            scores=CriticScore(
+                technical_accuracy=9,
+                completeness=8,
+                code_quality=10,
+                clarity=9,
+                voice=8,
+                originality=8,
+                length=9,
+                diagram_quality=10,
+            ),
+            overall_pass=True,
+            issues=[],
+            fact_check_needed=[],
+        )
+
         with patch("src.agent.nodes.KeyManager") as MockKeyManager, \
              patch("src.agent.nodes.ChatGoogleGenerativeAI") as MockLLM, \
+             patch("src.agent.nodes._critic_section") as mock_critic, \
              patch("src.agent.nodes.JobManager"):
 
             MockKeyManager.from_env.return_value = mock_key_manager
             mock_llm_instance = MagicMock()
             mock_llm_instance.invoke.return_value = mock_response
             MockLLM.return_value = mock_llm_instance
+            mock_critic.return_value = mock_critic_result
 
             result = await write_section_node(sample_state)
 
         assert result["current_section_index"] == 1
         assert "hook" in result["section_drafts"]
         assert result["section_drafts"]["hook"] == "Generated hook content here."
+        assert "hook" in result["section_reviews"]
         assert result["current_phase"] == Phase.WRITING.value
 
     @pytest.mark.asyncio
@@ -329,12 +350,30 @@ class TestWriteSectionNode:
         mock_response = MagicMock()
         mock_response.content = "Content"
 
+        mock_critic_result = SectionCriticResult(
+            scores=CriticScore(
+                technical_accuracy=8,
+                completeness=8,
+                code_quality=8,
+                clarity=8,
+                voice=8,
+                originality=8,
+                length=8,
+                diagram_quality=10,
+            ),
+            overall_pass=True,
+            issues=[],
+            fact_check_needed=[],
+        )
+
         with patch("src.agent.nodes.KeyManager") as MockKeyManager, \
              patch("src.agent.nodes.ChatGoogleGenerativeAI") as MockLLM, \
+             patch("src.agent.nodes._critic_section") as mock_critic, \
              patch("src.agent.nodes.JobManager"):
 
             MockKeyManager.from_env.return_value = mock_key_manager
             MockLLM.return_value.invoke.return_value = mock_response
+            mock_critic.return_value = mock_critic_result
 
             result = await write_section_node(sample_state)
 
@@ -360,12 +399,30 @@ class TestWriteSectionNode:
         mock_response = MagicMock()
         mock_response.content = "New problem content"
 
+        mock_critic_result = SectionCriticResult(
+            scores=CriticScore(
+                technical_accuracy=8,
+                completeness=8,
+                code_quality=8,
+                clarity=8,
+                voice=8,
+                originality=8,
+                length=8,
+                diagram_quality=10,
+            ),
+            overall_pass=True,
+            issues=[],
+            fact_check_needed=[],
+        )
+
         with patch("src.agent.nodes.KeyManager") as MockKeyManager, \
              patch("src.agent.nodes.ChatGoogleGenerativeAI") as MockLLM, \
+             patch("src.agent.nodes._critic_section") as mock_critic, \
              patch("src.agent.nodes.JobManager"):
 
             MockKeyManager.from_env.return_value = mock_key_manager
             MockLLM.return_value.invoke.return_value = mock_response
+            mock_critic.return_value = mock_critic_result
 
             result = await write_section_node(sample_state)
 
@@ -415,3 +472,187 @@ class TestWriteSectionNode:
 
         # Should transition to assembly (nothing to write)
         assert result["current_phase"] == Phase.ASSEMBLING.value
+
+
+class TestSectionCritic:
+    """Tests for section critic functions."""
+
+    def test_build_critic_prompt_includes_all_dimensions(self):
+        """Critic prompt mentions all 8 dimensions."""
+        section = {
+            "id": "intro",
+            "title": "Introduction",
+            "role": "hook",
+            "target_words": 200,
+            "needs_code": True,
+            "needs_diagram": False,
+        }
+        content = "Test content here."
+
+        prompt = _build_critic_prompt(section, content, target_words=200)
+
+        # Check all 8 dimensions mentioned
+        assert "technical_accuracy" in prompt
+        assert "completeness" in prompt
+        assert "code_quality" in prompt
+        assert "clarity" in prompt
+        assert "voice" in prompt
+        assert "originality" in prompt
+        assert "length" in prompt
+        assert "diagram_quality" in prompt
+
+        # Check section metadata included
+        assert "Introduction" in prompt
+        assert "hook" in prompt
+        assert "Test content here" in prompt
+
+    def test_build_critic_prompt_includes_word_count(self):
+        """Critic prompt includes actual and target word counts."""
+        section = {"id": "test", "role": "problem", "target_words": 250}
+        content = "This is a test section with some words."
+
+        prompt = _build_critic_prompt(section, content, target_words=250)
+
+        assert "250" in prompt  # Target words
+        assert "Actual word count" in prompt
+
+    def test_build_critic_prompt_includes_code_requirement(self):
+        """Critic prompt includes code requirement when needs_code=True."""
+        section = {"id": "impl", "role": "implementation", "needs_code": True}
+        content = "Test content"
+
+        prompt = _build_critic_prompt(section, content, target_words=200)
+
+        assert "needs_code: True" in prompt or "Needs code: True" in prompt
+
+    @pytest.fixture
+    def mock_key_manager(self):
+        """Create a mock KeyManager."""
+        manager = MagicMock()
+        manager.get_current_key.return_value = "test-api-key"
+        manager.record_usage = MagicMock()
+        return manager
+
+    @pytest.mark.asyncio
+    async def test_critic_section_returns_valid_result(self, mock_key_manager):
+        """_critic_section returns SectionCriticResult."""
+        section = {"id": "intro", "target_words": 200}
+        content = "Sample content"
+
+        # Mock LLM response
+        mock_result = SectionCriticResult(
+            scores=CriticScore(
+                technical_accuracy=9,
+                completeness=8,
+                code_quality=10,
+                clarity=9,
+                voice=8,
+                originality=7,
+                length=9,
+                diagram_quality=10,
+            ),
+            overall_pass=True,
+            issues=[],
+            fact_check_needed=["claim about performance"],
+        )
+
+        with patch("src.agent.nodes.ChatGoogleGenerativeAI") as mock_llm:
+            mock_structured = MagicMock()
+            mock_structured.invoke.return_value = mock_result
+            mock_llm.return_value.with_structured_output.return_value = mock_structured
+
+            result = await _critic_section(section, content, mock_key_manager)
+
+            assert isinstance(result, SectionCriticResult)
+            assert result.overall_pass is True
+            assert len(result.issues) == 0
+            assert result.scores.technical_accuracy == 9
+
+    @pytest.mark.asyncio
+    async def test_critic_identifies_issues_for_low_scores(self, mock_key_manager):
+        """Critic creates CriticIssue for dimensions scoring below 8."""
+        section = {"id": "intro", "target_words": 200}
+        content = "Bad content"
+
+        mock_result = SectionCriticResult(
+            scores=CriticScore(
+                technical_accuracy=6,  # Below threshold
+                completeness=7,  # Below threshold
+                code_quality=10,
+                clarity=9,
+                voice=8,
+                originality=5,  # Below threshold
+                length=9,
+                diagram_quality=10,
+            ),
+            overall_pass=False,  # avg = 7.375 < 8
+            issues=[
+                CriticIssue(
+                    dimension="technical_accuracy",
+                    location="paragraph 2",
+                    problem="Incorrect claim about Redis",
+                    suggestion="Check Redis docs",
+                ),
+                CriticIssue(
+                    dimension="completeness",
+                    location="overall",
+                    problem="Missing discussion of performance",
+                    suggestion="Add performance section",
+                ),
+                CriticIssue(
+                    dimension="originality",
+                    location="paragraph 3",
+                    problem="Paraphrased from source",
+                    suggestion="Rewrite with original insights",
+                ),
+            ],
+            fact_check_needed=[],
+        )
+
+        with patch("src.agent.nodes.ChatGoogleGenerativeAI") as mock_llm:
+            mock_structured = MagicMock()
+            mock_structured.invoke.return_value = mock_result
+            mock_llm.return_value.with_structured_output.return_value = mock_structured
+
+            result = await _critic_section(section, content, mock_key_manager)
+
+            assert result.overall_pass is False
+            assert len(result.issues) == 3
+            assert all(isinstance(issue, CriticIssue) for issue in result.issues)
+            assert result.issues[0].dimension == "technical_accuracy"
+            assert result.issues[0].problem == "Incorrect claim about Redis"
+
+    @pytest.mark.asyncio
+    async def test_critic_section_uses_flash_lite_model(self, mock_key_manager):
+        """Critic uses Flash-Lite model (cheaper, faster)."""
+        section = {"id": "test", "target_words": 200}
+        content = "Test content"
+
+        mock_result = SectionCriticResult(
+            scores=CriticScore(
+                technical_accuracy=8,
+                completeness=8,
+                code_quality=8,
+                clarity=8,
+                voice=8,
+                originality=8,
+                length=8,
+                diagram_quality=10,
+            ),
+            overall_pass=True,
+            issues=[],
+            fact_check_needed=[],
+        )
+
+        with patch("src.agent.nodes.ChatGoogleGenerativeAI") as mock_llm:
+            mock_structured = MagicMock()
+            mock_structured.invoke.return_value = mock_result
+            mock_llm.return_value.with_structured_output.return_value = mock_structured
+
+            await _critic_section(section, content, mock_key_manager)
+
+            # Verify Flash-Lite model was used
+            mock_llm.assert_called_once()
+            call_kwargs = mock_llm.call_args[1]
+            assert call_kwargs["model"] == "gemini-2.5-flash-lite"
+            assert call_kwargs["temperature"] == 0.3  # LLM_TEMPERATURE_LOW

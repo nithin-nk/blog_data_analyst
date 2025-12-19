@@ -29,6 +29,7 @@ from .state import (
     DiscoveryQueries,
     JobManager,
     Phase,
+    SectionCriticResult,
     SourceValidationList,
 )
 from .tools import fetch_url_content, search_duckduckgo
@@ -1419,6 +1420,150 @@ async def _write_section(
     raise RuntimeError(f"Failed to write section after {max_retries} attempts: {last_error}")
 
 
+def _build_critic_prompt(
+    section: dict,
+    content: str,
+    target_words: int,
+    blog_title: str = "",
+    context: str = "",
+) -> str:
+    """
+    Build critic prompt for 8-dimension section evaluation.
+
+    Args:
+        section: Section metadata (title, role, needs_code, needs_diagram)
+        content: Written section markdown
+        target_words: Target word count for length evaluation
+        blog_title: Overall blog title for context
+        context: User-provided context about the blog topic
+
+    Returns:
+        Critic evaluation prompt
+    """
+    section_title = section.get("title") or section.get("id", "")
+    section_role = section.get("role", "")
+    needs_code = section.get("needs_code", False)
+    needs_diagram = section.get("needs_diagram", False)
+
+    # Count actual words
+    actual_words = len(content.split())
+
+    # Build context section
+    context_info = ""
+    if blog_title:
+        context_info += f"\n- Blog title: {blog_title}"
+    if context:
+        context_info += f"\n- Blog context: {context}"
+
+    prompt = f"""You are an expert technical blog critic. Evaluate this section on 8 dimensions (1-10 scale).
+
+**Overall Blog Context:**{context_info}
+
+**Section Metadata:**
+- Title: {section_title}
+- Role: {section_role}
+- Target words: {target_words}
+- Needs code: {needs_code}
+- Needs diagram: {needs_diagram}
+
+**Section Content:**
+```markdown
+{content}
+```
+
+**Actual word count:** {actual_words}
+
+**Evaluation Criteria:**
+
+1. **technical_accuracy (1-10):** Are technical claims correct? Any misinformation?
+2. **completeness (1-10):** Does it cover all necessary aspects? Any gaps?
+3. **code_quality (1-10):** If code present: Is it runnable, includes imports, follows best practices? (10 if no code needed)
+4. **clarity (1-10):** Is it easy to understand? Clear explanations?
+5. **voice (1-10):** Does it follow the direct, opinionated technical style? No fluff?
+6. **originality (1-10):** Original insights, not just paraphrasing?
+7. **length (1-10):** Word count appropriate? (8-10: ±20% of target, 5-7: ±40%, 1-4: >40% off)
+8. **diagram_quality (1-10):** If diagram present: Is it clear and helpful? (10 if no diagram needed)
+
+**Pass threshold:** Average score >= 8.0
+
+For each dimension scoring below 8, create a CriticIssue with:
+- dimension: The failing dimension name
+- location: Where in the section (e.g., "paragraph 2", "code block 1")
+- problem: What's wrong
+- suggestion: Specific fix
+
+Also identify any claims that need fact-checking (quantitative claims, benchmark numbers, version-specific features).
+
+Output as SectionCriticResult with scores, overall_pass, issues, and fact_check_needed.
+"""
+
+    return prompt
+
+
+async def _critic_section(
+    section: dict,
+    content: str,
+    key_manager: KeyManager,
+    blog_title: str = "",
+    context: str = "",
+) -> SectionCriticResult:
+    """
+    Call Gemini Flash-Lite to critique a section.
+
+    Args:
+        section: Section metadata
+        content: Written section content
+        key_manager: API key manager
+        blog_title: Overall blog title for context
+        context: User-provided context about the blog topic
+
+    Returns:
+        SectionCriticResult with scores and feedback
+    """
+    target_words = section.get("target_words", 200)
+
+    prompt = _build_critic_prompt(
+        section=section,
+        content=content,
+        target_words=target_words,
+        blog_title=blog_title,
+        context=context,
+    )
+
+    # Use Flash-Lite for critic (cheaper, faster)
+    llm = ChatGoogleGenerativeAI(
+        model=LLM_MODEL_LITE,
+        temperature=LLM_TEMPERATURE_LOW,
+        google_api_key=key_manager.get_current_key(),
+    )
+
+    # Structured output for SectionCriticResult
+    llm_structured = llm.with_structured_output(SectionCriticResult)
+
+    # Run async LLM call
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: llm_structured.invoke(prompt),
+    )
+
+    # Record API usage
+    key_manager.record_usage(success=True)
+
+    # Calculate average score
+    scores_dict = result.scores.model_dump()
+    avg_score = sum(scores_dict.values()) / len(scores_dict)
+
+    logger.info(
+        f"Critic result for {section.get('id')}: "
+        f"avg_score={avg_score:.1f}, "
+        f"pass={result.overall_pass}, "
+        f"issues={len(result.issues)}"
+    )
+
+    return result
+
+
 async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
     """
     Phase 3: Write Section Node.
@@ -1484,9 +1629,27 @@ async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
             blog_title=blog_title,
             key_manager=key_manager,
         )
+        logger.info(f"Section '{section_title}' written ({len(content.split())} words)")
+
+        # Critique the section
+        critic_result = await _critic_section(
+            section=section,
+            content=content,
+            key_manager=key_manager,
+            blog_title=blog_title,
+            context=state.get("context", ""),
+        )
+        logger.info(
+            f"Critic for {section_id}: pass={critic_result.overall_pass}, "
+            f"issues={len(critic_result.issues)}"
+        )
 
         # Save to section_drafts
         section_drafts[section_id] = content
+
+        # Save critic result
+        section_reviews = dict(state.get("section_reviews", {}))
+        section_reviews[section_id] = critic_result.model_dump()
 
         # Save checkpoint
         if job_id:
@@ -1501,13 +1664,15 @@ async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
                     "current_phase": Phase.WRITING.value,
                     "current_section_index": current_idx + 1,
                     "section_drafts": section_drafts,
+                    "section_reviews": section_reviews,
                 },
             )
 
-        logger.info(f"Section '{section_title}' written successfully ({len(content.split())} words)")
+        logger.info(f"Section '{section_title}' completed with critic evaluation")
 
         return {
             "section_drafts": section_drafts,
+            "section_reviews": section_reviews,
             "current_section_index": current_idx + 1,
             "current_phase": Phase.WRITING.value,
         }

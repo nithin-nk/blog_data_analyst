@@ -151,13 +151,25 @@ class BlogPlan(BaseModel):
 
 
 class CriticScore(BaseModel):
-    """Scores from section/final critic (1-10 scale)."""
+    """8 scoring dimensions (1-10 scale)."""
 
     technical_accuracy: int = Field(ge=1, le=10, description="Technical correctness")
     completeness: int = Field(ge=1, le=10, description="Coverage of topic")
+    code_quality: int = Field(ge=1, le=10, description="Quality of code examples")
     clarity: int = Field(ge=1, le=10, description="Ease of understanding")
     voice: int = Field(ge=1, le=10, description="Consistent author voice")
     originality: int = Field(ge=1, le=10, description="Not copied from sources")
+    length: int = Field(ge=1, le=10, description="Appropriate word count")
+    diagram_quality: int = Field(ge=1, le=10, default=10, description="Diagram quality (10 if no diagrams)")
+
+
+class CriticIssue(BaseModel):
+    """A single issue identified by the critic."""
+
+    dimension: str = Field(description="Which dimension failed: technical_accuracy, completeness, etc.")
+    location: str = Field(description="Where in the section: 'paragraph 2', 'code block 1', 'diagram'")
+    problem: str = Field(description="What's wrong")
+    suggestion: str = Field(description="How to fix it")
 
 
 class SectionCriticResult(BaseModel):
@@ -165,7 +177,7 @@ class SectionCriticResult(BaseModel):
 
     scores: CriticScore
     overall_pass: bool = Field(description="Whether section passes quality gate (avg >= 8)")
-    issues: list[str] = Field(default_factory=list, description="Specific issues found")
+    issues: list[CriticIssue] = Field(default_factory=list, description="Specific issues found")
     fact_check_needed: list[str] = Field(
         default_factory=list,
         description="Claims that need verification",
