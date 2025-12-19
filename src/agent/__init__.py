@@ -20,7 +20,12 @@ from .state import (
     SourceValidationList,
     JobManager,
 )
-from .nodes import topic_discovery_node, planning_node
+from .nodes import (
+    topic_discovery_node,
+    planning_node,
+    research_node,
+    validate_sources_node,
+)
 
 __all__ = [
     # Tools
@@ -45,4 +50,6 @@ __all__ = [
     # Nodes
     "topic_discovery_node",
     "planning_node",
+    "research_node",
+    "validate_sources_node",
 ]

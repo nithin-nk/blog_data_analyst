@@ -188,6 +188,16 @@ class SourceValidationList(BaseModel):
     sources: list[SourceValidation] = Field(description="Validation results")
 
 
+class AlternativeQueries(BaseModel):
+    """Alternative search queries for retry when sources are insufficient."""
+
+    queries: list[str] = Field(
+        min_length=2,
+        max_length=3,
+        description="2-3 alternative search queries different from the originals",
+    )
+
+
 # =============================================================================
 # JobManager - Checkpoint/Resume
 # =============================================================================

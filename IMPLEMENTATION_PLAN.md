@@ -106,7 +106,7 @@ Additional files:
 
 ---
 
-### Phase 5: Research (Phase 2 + 2.5)
+### Phase 5: Research (Phase 2 + 2.5) - COMPLETED
 **Goal**: Fetch and validate sources for each section
 
 1. Implement `research_node(state)`:
@@ -122,6 +122,15 @@ Additional files:
 **Integration Test**: `test_research.py`
 - Test fetches content from multiple URLs
 - Test validation filters out low-quality sources
+
+**Implementation Notes**:
+- Model used: `gemini-2.5-flash-lite` for validation
+- Helper functions: `_hash_url`, `_research_section`, `_build_validation_prompt`, `_validate_section_sources`
+- Research cache keyed by MD5 hash of URL (12 chars)
+- Validates all sections including optional deep_dive sections
+- Sources include quality (high/medium/low) and reason fields
+- API key rotation on 429 errors via KeyManager
+- 34 unit tests (research + validation) + 8 integration tests all passing
 
 ---
 
@@ -336,6 +345,7 @@ blog_data_analyst/
 2. ~~**Phase 2: State + Checkpoints** - State schema and job management~~ DONE
 3. ~~**Phase 3: Topic Discovery** - Generate search queries and gather topic context~~ DONE
 4. ~~**Phase 4: Planning** - Generate blog outline with sections~~ DONE
-5. **Phase 5: Research** - Fetch and validate sources for each section
-6. After each phase, run integration tests before moving to next
-7. Build incrementally, testing as we go
+5. ~~**Phase 5: Research** - Fetch and validate sources for each section~~ DONE
+6. **Phase 6: Writing Loop** - Write, critique, and refine each section
+7. After each phase, run integration tests before moving to next
+8. Build incrementally, testing as we go
