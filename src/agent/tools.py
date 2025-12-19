@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx
 import trafilatura
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ async def search_duckduckgo(
     query: str,
     max_results: int = 5,
     retry_count: int = 2,
+    region: str = "us-en",
 ) -> list[dict[str, str]]:
     """
     Search DuckDuckGo and return results.
@@ -45,6 +46,8 @@ async def search_duckduckgo(
         query: Search query string
         max_results: Maximum results to return (default 5)
         retry_count: Number of retries on failure (default 2)
+        region: Search region (default "us-en" for US English results)
+                Options: "us-en", "in-en" (India), "wt-wt" (worldwide)
 
     Returns:
         List of search results with keys: title, url, snippet
@@ -59,7 +62,7 @@ async def search_duckduckgo(
         """Synchronous search function to run in thread pool."""
         try:
             with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=max_results))
+                results = list(ddgs.text(query, max_results=max_results, region=region))
                 return [
                     {
                         "title": r.get("title", ""),

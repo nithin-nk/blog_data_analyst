@@ -14,6 +14,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 5. **Keep plans concise** - Plans should be short and to the point. No fluff. Skip code details and use bulleted points to explain how each task will be accomplished.
 
+6. **Refer to design.md for implementation plans** - Always consult design.md to get a complete understanding of the design before creating or updating implementation plans.
+
+7. **Mark completed implementation plans** - Update IMPLEMENTATION_PLAN.md to mark tasks/phases as completed when they are done.
+
+8. **Run integration tests with real data** - After implementing a feature, run integration tests with actual LLM calls. Show the raw output, analyze the results, and display a summary report at the end of the implementation.
+
 ## Project Overview
 
 Blog Agent - An AI-powered technical blog writer that generates publication-ready markdown from a title and context. Uses Python + LangGraph with Google Gemini (Flash/Flash-Lite models).
@@ -116,13 +122,14 @@ Jobs persist to `~/.blog_agent/jobs/{job_id}/` with:
 
 ## API Keys
 
-Uses 4 Google Gemini API keys for quota management. Create `.env`:
+Uses up to 5 Google Gemini API keys for quota management. Create `.env`:
 
 ```env
 GOOGLE_API_KEY_1=...
 GOOGLE_API_KEY_2=...
 GOOGLE_API_KEY_3=...
 GOOGLE_API_KEY_4=...
+GOOGLE_API_KEY_5=...
 ```
 
 KeyManager rotates keys on 429 errors and tracks usage per key.

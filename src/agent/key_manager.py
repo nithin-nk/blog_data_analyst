@@ -78,17 +78,17 @@ class KeyManager:
         """
         Create KeyManager from environment variables.
 
-        Looks for GOOGLE_API_KEY_1 through GOOGLE_API_KEY_4.
+        Looks for GOOGLE_API_KEY_1 through GOOGLE_API_KEY_5.
         """
         keys = []
-        for i in range(1, 5):
+        for i in range(1, 6):
             key = os.environ.get(f"GOOGLE_API_KEY_{i}")
             if key:
                 keys.append(key)
 
         if not keys:
             raise ValueError(
-                "No API keys found. Set GOOGLE_API_KEY_1 through GOOGLE_API_KEY_4 "
+                "No API keys found. Set GOOGLE_API_KEY_1 through GOOGLE_API_KEY_5 "
                 "environment variables."
             )
 
