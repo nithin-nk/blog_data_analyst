@@ -74,6 +74,7 @@
 │  │      └── {job_id}/            # One folder per blog job             │   │
 │  │          ├── state.json       # Current phase, progress, can_resume │   │
 │  │          ├── input.json       # Original title + context            │   │
+│  │          ├── topic_context.json # Discovery search results          │   │
 │  │          ├── plan.json        # Outline, search queries, metadata   │   │
 │  │          ├── research/                                              │   │
 │  │          │   ├── cache/       # Raw fetched articles (for resume)   │   │
@@ -92,8 +93,8 @@
 │  │          └── final.md         # Approved output                     │   │
 │  │                                                                      │   │
 │  │  State Machine:                                                      │   │
-│  │  planning → researching → validating_sources → writing →            │   │
-│  │  reviewing → assembling → final_review → done | failed              │   │
+│  │  topic_discovery → planning → researching → validating_sources →    │   │
+│  │  writing → reviewing → assembling → final_review → done | failed    │   │
 │  │                                                                      │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                              │
@@ -137,6 +138,101 @@
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                                                                              │
 │  ══════════════════════════════════════════════════════════════════════════ │
+│                      PHASE 0.5: TOPIC DISCOVERY                              │
+│                      Model: Flash-Lite                                       │
+│                      LLM Calls: 1                                            │
+│  ══════════════════════════════════════════════════════════════════════════ │
+│                                                                              │
+│  PURPOSE: Gather current web context about cutting-edge topics before       │
+│           planning subtopics, since LLM training data may be outdated.      │
+│                                                                              │
+│    ┌────────────────────────────────────────────────────────────────────┐  │
+│    │ STEP 0.5.1: GENERATE DISCOVERY QUERIES                            │  │
+│    │ Model: Flash-Lite                                                 │  │
+│    ├────────────────────────────────────────────────────────────────────┤  │
+│    │                                                                     │  │
+│    │ QUERY GENERATOR PROMPT                                             │  │
+│    │ ┌─────────────────────────────────────────────────────────────┐   │  │
+│    │ │ Generate 3-5 search queries to learn about this topic:      │   │  │
+│    │ │                                                              │   │  │
+│    │ │ Title: "{title}"                                            │   │  │
+│    │ │ Context: "{context}"                                        │   │  │
+│    │ │                                                              │   │  │
+│    │ │ Goals:                                                       │   │  │
+│    │ │ - Understand what this topic is about                       │   │  │
+│    │ │ - Find key subtopics and concepts                           │   │  │
+│    │ │ - Discover recent developments (2024-2025)                  │   │  │
+│    │ │ - Identify practical use cases                              │   │  │
+│    │ │                                                              │   │  │
+│    │ │ Output JSON: { "queries": ["...", "...", ...] }             │   │  │
+│    │ └─────────────────────────────────────────────────────────────┘   │  │
+│    │                                                                     │  │
+│    │ OUTPUT:                                                            │  │
+│    │ {                                                                  │  │
+│    │   "queries": [                                                     │  │
+│    │     "semantic caching LLM 2024",                                  │  │
+│    │     "GPTCache how it works",                                      │  │
+│    │     "vector similarity caching AI applications",                  │  │
+│    │     "semantic cache vs traditional cache LLM"                     │  │
+│    │   ]                                                               │  │
+│    │ }                                                                  │  │
+│    │                                                                     │  │
+│    └────────────────────────────────────────────────────────────────────┘  │
+│                          │                                                  │
+│                          ▼                                                  │
+│    ┌────────────────────────────────────────────────────────────────────┐  │
+│    │ STEP 0.5.2: SEARCH                                                │  │
+│    │ (No LLM - DuckDuckGo API)                                         │  │
+│    ├────────────────────────────────────────────────────────────────────┤  │
+│    │                                                                     │  │
+│    │  from duckduckgo_search import DDGS                                │  │
+│    │                                                                     │  │
+│    │  For each query in discovery_queries:                              │  │
+│    │    results = DDGS().text(query, max_results=5)                    │  │
+│    │    collect: title, url, description (snippet)                     │  │
+│    │                                                                     │  │
+│    │  Deduplicate by URL                                                │  │
+│    │                                                                     │  │
+│    └────────────────────────────────────────────────────────────────────┘  │
+│                          │                                                  │
+│                          ▼                                                  │
+│    ┌────────────────────────────────────────────────────────────────────┐  │
+│    │ STEP 0.5.3: COMPILE SNIPPETS                                      │  │
+│    │ (No LLM - programmatic)                                           │  │
+│    ├────────────────────────────────────────────────────────────────────┤  │
+│    │                                                                     │  │
+│    │  Format for planner:                                               │  │
+│    │  topic_context = [                                                 │  │
+│    │    {                                                               │  │
+│    │      "title": "GPTCache: A Library for Creating Semantic Cache",  │  │
+│    │      "url": "https://github.com/...",                             │  │
+│    │      "snippet": "GPTCache is a library for creating semantic..."  │  │
+│    │    },                                                              │  │
+│    │    ...                                                             │  │
+│    │  ]                                                                 │  │
+│    │                                                                     │  │
+│    │  Limit to top 15-20 unique results                                │  │
+│    │                                                                     │  │
+│    └────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│  OUTPUT (topic_context.json)                                                │
+│  {                                                                          │
+│    "queries_used": ["...", "..."],                                         │
+│    "results": [                                                            │
+│      { "title": "...", "url": "...", "snippet": "..." },                   │
+│      ...                                                                    │
+│    ],                                                                       │
+│    "result_count": 18                                                      │
+│  }                                                                          │
+│                                                                              │
+│  CHECKPOINT: Save topic_context.json                                        │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│  ══════════════════════════════════════════════════════════════════════════ │
 │                         PHASE 1: PLANNING                                    │
 │                         Model: Flash-Lite                                    │
 │                         LLM Calls: 1                                         │
@@ -146,7 +242,8 @@
 │  ├── title: "Semantic Caching for LLM Applications"                         │
 │  ├── context: "Saw GPTCache on Twitter. Redis vector search..."            │
 │  ├── target_length: "medium" (1500 words)                                   │
-│  └── style_guide: [embedded from your blog analysis]                        │
+│  ├── style_guide: [embedded from your blog analysis]                        │
+│  └── topic_context: [search snippets from Phase 0.5]                        │
 │                                                                              │
 │  PLANNER PROMPT                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
@@ -166,6 +263,13 @@
 │  │ - needs_code (true/false)                                           │   │
 │  │ - needs_diagram (true if architecture/flow explanation)             │   │
 │  │ - target_words (distribute {total_words} across sections)           │   │
+│  │                                                                      │   │
+│  │ ## Topic Research (from web search)                                 │   │
+│  │ The following snippets provide current context about this topic:    │   │
+│  │ {topic_context_snippets}                                            │   │
+│  │                                                                      │   │
+│  │ Use this research to inform your subtopic selection.                │   │
+│  │ Focus on aspects that appear important based on this context.       │   │
 │  │                                                                      │   │
 │  │ Output JSON.                                                        │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
@@ -964,7 +1068,8 @@
 
 | Phase | LLM Calls | Model | Tokens (in) | Tokens (out) |
 |-------|-----------|-------|-------------|--------------|
-| **Planning** | 1 | Flash-Lite | 2,000 | 1,000 |
+| **Topic Discovery** | 1 | Flash-Lite | 500 | 200 |
+| **Planning** | 1 | Flash-Lite | 2,500 | 1,000 |
 | **Research Validation** | 1 | Flash-Lite | 4,000 | 500 |
 | **Per Section (×6):** | | | | |
 | → Write | 1 | Flash | 6,000 | 1,500 |
@@ -979,11 +1084,11 @@
 | → Final Refine | 1 | Flash | 6,000 | 2,000 |
 | → Mermaid render | 0 | (kroki API) | 0 | 0 |
 | → Citations | 0 | (programmatic) | 0 | 0 |
-| **TOTAL** | **~24** | | **~101,000** | **~24,900** |
+| **TOTAL** | **~25** | | **~102,000** | **~25,100** |
 
 **Budget check:**
-- 4 projects × 250 RPD = **1,000 requests/day** → Using ~24 ✓
-- 4 projects × 250k TPM = **1M tokens/min** → Using ~126k total ✓
+- 4 projects × 250 RPD = **1,000 requests/day** → Using ~25 ✓
+- 4 projects × 250k TPM = **1M tokens/min** → Using ~127k total ✓
 - **Plenty of headroom for retries or longer blogs**
 
 ---
