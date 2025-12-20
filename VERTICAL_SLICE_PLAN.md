@@ -290,7 +290,7 @@ async def _critic_section(section, content, key_manager) -> SectionCriticResult:
 
 ### Slice 6.6: Section Refine Loop
 
-**Status**: ○ PENDING
+**Status**: ✓ COMPLETE
 
 **Files to modify**:
 - `src/agent/config.py` - Add retry constants
@@ -751,7 +751,7 @@ async def _re_research_section(section, key_manager) -> list[dict]:
 | 6.3 | Graph + Routing | test_graph.py | test_full_graph.py | ✓ |
 | 6.4 | CLI Start Command | test_cli.py | test_cli_integration.py | ✓ |
 | 6.5 | Section Critic | test_writing.py | test_writing_integration.py | ✓ |
-| 6.6 | Section Refine Loop | test_writing.py | test_writing_integration.py | ○ |
+| 6.6 | Section Refine Loop | test_writing.py | test_writing_integration.py | ✓ |
 | 6.7 | Final Critic | test_assembly.py | test_assembly_integration.py | ○ |
 | 6.8 | Basic Human Review | test_graph.py | Manual | ○ |
 | 6.9 | Title + SEO | test_title_seo.py | test_title_seo_integration.py | ○ |

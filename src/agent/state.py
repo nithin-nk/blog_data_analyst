@@ -170,6 +170,11 @@ class CriticIssue(BaseModel):
     location: str = Field(description="Where in the section: 'paragraph 2', 'code block 1', 'diagram'")
     problem: str = Field(description="What's wrong")
     suggestion: str = Field(description="How to fix it")
+    needs_research: bool = Field(default=False, description="True if missing info requires web search")
+    suggested_queries: list[str] = Field(
+        default_factory=list,
+        description="2 search queries to find missing information"
+    )
 
 
 class SectionCriticResult(BaseModel):

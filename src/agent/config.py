@@ -8,6 +8,13 @@ MAX_SOURCES_PER_SECTION = 10
 MIN_SOURCES_PER_SECTION = 4
 MAX_VALIDATION_RETRIES = 3
 
+# Retry limits
+MAX_SECTION_RETRIES = 2  # Section refinement retries
+
+# Dynamic research for refine loop
+MAX_RESEARCH_QUERIES_PER_ISSUE = 2  # Queries per completeness issue
+MAX_RESEARCH_URLS_PER_QUERY = 3  # URLs per query (6 total sources)
+
 # Query diversification modifiers for retries
 # Each retry uses a different focus to find varied sources
 QUERY_DIVERSIFICATION_MODIFIERS = [

@@ -16,7 +16,10 @@ from src.agent.nodes import (
     _get_previous_sections_text,
     _build_writer_prompt,
     _build_critic_prompt,
+    _build_refiner_prompt,
+    _build_scratchpad_entry,
     _critic_section,
+    _refine_section,
     write_section_node,
 )
 from src.agent.state import CriticIssue, CriticScore, Phase, SectionCriticResult
@@ -656,3 +659,440 @@ class TestSectionCritic:
             call_kwargs = mock_llm.call_args[1]
             assert call_kwargs["model"] == "gemini-2.5-flash-lite"
             assert call_kwargs["temperature"] == 0.3  # LLM_TEMPERATURE_LOW
+
+
+class TestSectionRefine:
+    """Tests for section refinement functions."""
+
+    def test_build_scratchpad_entry_initial_attempt(self):
+        """Build scratchpad entry for initial write (attempt 0)."""
+        critic_result = SectionCriticResult(
+            scores=CriticScore(
+                technical_accuracy=7,
+                completeness=6,
+                code_quality=5,
+                clarity=8,
+                voice=8,
+                originality=7,
+                length=7,
+                diagram_quality=10,
+            ),
+            overall_pass=False,
+            issues=[
+                CriticIssue(
+                    dimension="completeness",
+                    location="overall",
+                    problem="Missing examples",
+                    suggestion="Add code examples",
+                )
+            ],
+            fact_check_needed=[],
+        )
+
+        entry = _build_scratchpad_entry(0, critic_result)
+
+        assert entry["attempt"] == 0
+        assert entry["score"] == 7.25  # avg of scores
+        assert entry["scores_breakdown"]["completeness"] == 6
+        assert entry["score_changes"] == {}  # No previous entry
+        assert len(entry["issues"]) == 1
+        assert "completeness: Missing examples" in entry["issues"]
+        assert entry["addressed_issues"] == []
+        assert entry["new_issues"] == entry["issues"]  # All issues are new
+
+    def test_build_scratchpad_entry_with_improvement(self):
+        """Build scratchpad entry showing improvement from previous attempt."""
+        # Previous entry
+        prev_critic = SectionCriticResult(
+            scores=CriticScore(
+                technical_accuracy=7,
+                completeness=6,
+                code_quality=5,
+                clarity=8,
+                voice=8,
+                originality=7,
+                length=7,
+                diagram_quality=10,
+            ),
+            overall_pass=False,
+            issues=[
+                CriticIssue(
+                    dimension="completeness",
+                    location="overall",
+                    problem="Missing examples",
+                    suggestion="Add examples",
+                ),
+                CriticIssue(
+                    dimension="code_quality",
+                    location="section 2",
+                    problem="No code",
+                    suggestion="Add code",
+                ),
+            ],
+            fact_check_needed=[],
+        )
+        prev_entry = _build_scratchpad_entry(0, prev_critic)
+
+        # Current entry (after refinement)
+        current_critic = SectionCriticResult(
+            scores=CriticScore(
+                technical_accuracy=8,  # +1
+                completeness=7,  # +1
+                code_quality=8,  # +3
+                clarity=8,  # 0
+                voice=7,  # -1
+                originality=7,  # 0
+                length=7,  # 0
+                diagram_quality=10,  # 0
+            ),
+            overall_pass=False,
+            issues=[
+                CriticIssue(
+                    dimension="voice",
+                    location="paragraph 1",
+                    problem="Too formal",
+                    suggestion="Use direct style",
+                )
+            ],
+            fact_check_needed=[],
+        )
+
+        entry = _build_scratchpad_entry(1, current_critic, prev_entry)
+
+        assert entry["attempt"] == 1
+        assert entry["score"] == 7.75
+        assert entry["score_changes"]["technical_accuracy"] == "+1"
+        assert entry["score_changes"]["completeness"] == "+1"
+        assert entry["score_changes"]["code_quality"] == "+3"
+        assert entry["score_changes"]["voice"] == "-1"
+        assert entry["score_changes"]["clarity"] == "0"
+        assert "completeness: Missing examples" in entry["addressed_issues"]
+        assert "code_quality: No code" in entry["addressed_issues"]
+        assert "voice: Too formal" in entry["new_issues"]
+
+    def test_build_scratchpad_entry_with_regression(self):
+        """Build scratchpad entry showing score regression."""
+        prev_critic = SectionCriticResult(
+            scores=CriticScore(
+                technical_accuracy=8,
+                completeness=8,
+                code_quality=8,
+                clarity=8,
+                voice=8,
+                originality=8,
+                length=8,
+                diagram_quality=10,
+            ),
+            overall_pass=True,
+            issues=[],
+            fact_check_needed=[],
+        )
+        prev_entry = _build_scratchpad_entry(0, prev_critic)
+
+        current_critic = SectionCriticResult(
+            scores=CriticScore(
+                technical_accuracy=7,
+                completeness=7,
+                code_quality=7,
+                clarity=7,
+                voice=7,
+                originality=7,
+                length=7,
+                diagram_quality=10,
+            ),
+            overall_pass=False,
+            issues=[
+                CriticIssue(
+                    dimension="clarity",
+                    location="overall",
+                    problem="Less clear",
+                    suggestion="Improve clarity",
+                )
+            ],
+            fact_check_needed=[],
+        )
+
+        entry = _build_scratchpad_entry(1, current_critic, prev_entry)
+
+        # (7+7+7+7+7+7+7+10)/8 = 59/8 = 7.375, rounded to 7.38
+        assert entry["score"] == 7.38
+        assert all(v == "-1" for k, v in entry["score_changes"].items() if k != "diagram_quality")
+        assert len(entry["new_issues"]) == 1
+        assert len(entry["addressed_issues"]) == 0
+
+    def test_build_refiner_prompt_includes_issues(self):
+        """Refiner prompt includes all critic issues."""
+        section = {
+            "id": "intro",
+            "title": "Introduction",
+            "role": "hook",
+            "target_words": 200,
+        }
+        content = "Original content here."
+        issues = [
+            {
+                "dimension": "technical_accuracy",
+                "location": "paragraph 2",
+                "problem": "Incorrect claim about Redis",
+                "suggestion": "Check Redis documentation",
+            },
+            {
+                "dimension": "clarity",
+                "location": "code block 1",
+                "problem": "Missing imports",
+                "suggestion": "Add import statements",
+            },
+        ]
+        scores = {
+            "technical_accuracy": 6,
+            "completeness": 8,
+            "code_quality": 10,
+            "clarity": 7,
+            "voice": 8,
+            "originality": 8,
+            "length": 9,
+            "diagram_quality": 10,
+        }
+
+        prompt = _build_refiner_prompt(section, content, issues, scores)
+
+        # Check all issues included
+        assert "technical_accuracy" in prompt
+        assert "Incorrect claim about Redis" in prompt
+        assert "Check Redis documentation" in prompt
+        assert "clarity" in prompt
+        assert "Missing imports" in prompt
+
+        # Check scores shown
+        assert "6/10" in prompt or "6" in prompt  # technical_accuracy score
+        assert "7/10" in prompt or "7" in prompt  # clarity score
+
+        # Check content included
+        assert "Original content here" in prompt
+
+    def test_build_refiner_prompt_shows_average_score(self):
+        """Refiner prompt shows current average score."""
+        section = {"id": "test", "target_words": 200}
+        content = "Test"
+        issues = []
+        scores = {
+            "technical_accuracy": 7,
+            "completeness": 7,
+            "code_quality": 10,
+            "clarity": 7,
+            "voice": 7,
+            "originality": 6,
+            "length": 8,
+            "diagram_quality": 10,
+        }
+
+        prompt = _build_refiner_prompt(section, content, issues, scores)
+
+        # Average is (7+7+10+7+7+6+8+10)/8 = 7.75
+        assert "7.8" in prompt or "7.7" in prompt or "7.75" in prompt
+
+    def test_build_refiner_prompt_includes_scratchpad(self):
+        """Refiner prompt includes scratchpad history."""
+        section = {"id": "test", "target_words": 200}
+        content = "Test"
+        issues = [{"dimension": "clarity", "location": "overall", "problem": "Unclear", "suggestion": "Clarify"}]
+        scores = {
+            "technical_accuracy": 7,
+            "completeness": 7,
+            "code_quality": 7,
+            "clarity": 6,
+            "voice": 7,
+            "originality": 7,
+            "length": 7,
+            "diagram_quality": 10,
+        }
+        scratchpad = [
+            {
+                "attempt": 0,
+                "score": 7.0,
+                "issues": ["completeness: Missing info", "code_quality: No code"],
+                "addressed_issues": [],
+                "new_issues": ["completeness: Missing info", "code_quality: No code"],
+            },
+            {
+                "attempt": 1,
+                "score": 6.88,
+                "issues": ["clarity: Unclear"],
+                "addressed_issues": ["completeness: Missing info", "code_quality: No code"],
+                "new_issues": ["clarity: Unclear"],
+            },
+        ]
+
+        prompt = _build_refiner_prompt(section, content, issues, scores, scratchpad=scratchpad)
+
+        # Check scratchpad history included
+        assert "Previous Refinement Attempts" in prompt or "Refinement History" in prompt
+        assert "Attempt 0" in prompt
+        assert "Attempt 1" in prompt
+        assert "completeness: Missing info" in prompt
+        assert "code_quality: No code" in prompt
+        assert "Don't repeat" in prompt or "Learn from previous" in prompt
+
+    def test_build_refiner_prompt_includes_style_guide(self):
+        """Refiner prompt includes style guide."""
+        section = {"id": "test", "target_words": 200}
+        content = "Test"
+        issues = []
+        scores = {k: 7 for k in ["technical_accuracy", "completeness", "code_quality", "clarity", "voice", "originality", "length"]}
+        scores["diagram_quality"] = 10
+
+        style_guide = "Be direct. No fluff. Use short sentences."
+
+        prompt = _build_refiner_prompt(section, content, issues, scores, style_guide=style_guide)
+
+        assert "Be direct" in prompt
+        assert "No fluff" in prompt
+        assert "short sentences" in prompt
+        assert "Style" in prompt or "Writing" in prompt
+
+    @pytest.fixture
+    def mock_key_manager(self):
+        """Create a mock KeyManager."""
+        manager = MagicMock()
+        manager.get_current_key.return_value = "test-api-key"
+        manager.record_usage = MagicMock()
+        return manager
+
+    @pytest.mark.asyncio
+    async def test_refine_section_calls_llm(self, mock_key_manager):
+        """_refine_section calls Gemini Flash with refiner prompt."""
+        section = {"id": "intro", "target_words": 200}
+        content = "Original content"
+        critic_result = SectionCriticResult(
+            scores=CriticScore(
+                technical_accuracy=6,
+                completeness=7,
+                code_quality=10,
+                clarity=7,
+                voice=8,
+                originality=6,
+                length=9,
+                diagram_quality=10,
+            ),
+            overall_pass=False,
+            issues=[
+                CriticIssue(
+                    dimension="technical_accuracy",
+                    location="paragraph 1",
+                    problem="Wrong claim",
+                    suggestion="Fix it",
+                )
+            ],
+            fact_check_needed=[],
+        )
+
+        mock_response = MagicMock()
+        mock_response.content = "Refined content here"
+
+        with patch("src.agent.nodes.ChatGoogleGenerativeAI") as mock_llm:
+            mock_llm_instance = MagicMock()
+            mock_llm_instance.invoke.return_value = mock_response
+            mock_llm.return_value = mock_llm_instance
+
+            result = await _refine_section(section, content, critic_result, mock_key_manager)
+
+            # Verify LLM called
+            mock_llm.assert_called_once()
+
+            # Verify model selection (Gemini Flash, not Flash-Lite)
+            call_kwargs = mock_llm.call_args[1]
+            assert call_kwargs["model"] == "gemini-2.5-flash"  # LLM_MODEL_FULL
+            assert call_kwargs["temperature"] == 0.3  # LLM_TEMPERATURE_LOW
+
+            # Verify refined content returned
+            assert result == "Refined content here"
+
+    @pytest.mark.asyncio
+    async def test_refine_section_converts_pydantic_to_dict(self, mock_key_manager):
+        """_refine_section converts Pydantic models to dicts for prompt."""
+        section = {"id": "test", "target_words": 200}
+        content = "Test"
+        critic_result = SectionCriticResult(
+            scores=CriticScore(
+                technical_accuracy=7,
+                completeness=7,
+                code_quality=10,
+                clarity=7,
+                voice=7,
+                originality=7,
+                length=7,
+                diagram_quality=10,
+            ),
+            overall_pass=False,
+            issues=[
+                CriticIssue(
+                    dimension="voice",
+                    location="overall",
+                    problem="Too formal",
+                    suggestion="Use direct style",
+                )
+            ],
+            fact_check_needed=[],
+        )
+
+        mock_response = MagicMock()
+        mock_response.content = "Refined"
+
+        with patch("src.agent.nodes.ChatGoogleGenerativeAI") as mock_llm:
+            mock_llm_instance = MagicMock()
+            mock_llm_instance.invoke.return_value = mock_response
+            mock_llm.return_value = mock_llm_instance
+
+            await _refine_section(section, content, critic_result, mock_key_manager)
+
+            # Verify invoke was called (model_dump succeeded)
+            assert mock_llm_instance.invoke.called
+
+    @pytest.mark.asyncio
+    async def test_refine_section_with_scratchpad(self, mock_key_manager):
+        """_refine_section passes scratchpad to prompt builder."""
+        section = {"id": "test", "target_words": 200}
+        content = "Test"
+        critic_result = SectionCriticResult(
+            scores=CriticScore(
+                technical_accuracy=7,
+                completeness=7,
+                code_quality=7,
+                clarity=7,
+                voice=7,
+                originality=7,
+                length=7,
+                diagram_quality=10,
+            ),
+            overall_pass=False,
+            issues=[
+                CriticIssue(
+                    dimension="clarity",
+                    location="overall",
+                    problem="Unclear",
+                    suggestion="Clarify",
+                )
+            ],
+            fact_check_needed=[],
+        )
+        scratchpad = [
+            {"attempt": 0, "score": 7.0, "issues": ["completeness: Missing"]},
+        ]
+
+        mock_response = MagicMock()
+        mock_response.content = "Refined"
+
+        with patch("src.agent.nodes.ChatGoogleGenerativeAI") as mock_llm, \
+             patch("src.agent.nodes._build_refiner_prompt") as mock_build_prompt:
+
+            mock_llm_instance = MagicMock()
+            mock_llm_instance.invoke.return_value = mock_response
+            mock_llm.return_value = mock_llm_instance
+            mock_build_prompt.return_value = "Test prompt"
+
+            await _refine_section(section, content, critic_result, mock_key_manager, scratchpad=scratchpad)
+
+            # Verify scratchpad was passed to prompt builder
+            mock_build_prompt.assert_called_once()
+            call_kwargs = mock_build_prompt.call_args[1]
+            assert call_kwargs["scratchpad"] == scratchpad

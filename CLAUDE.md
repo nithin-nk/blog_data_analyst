@@ -22,6 +22,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 9. **Add pip packages to pyproject.toml** - When installing a new pip package, always add it to pyproject.toml under `[project.dependencies]` to keep dependencies tracked and reproducible.
 
+10. **Read all planning documents before any planning work** - When planning any feature, phase, or significant implementation work, you MUST read:
+   - VERTICAL_SLICE_PLAN.md (vertical slice strategy and current status)
+   - IMPLEMENTATION_PLAN.md (overall implementation phases and modules)
+   - design.md (complete architecture specification)
+
+   After reading these documents, think thoroughly about the implementation approach. Ensure no detail is missed from these documents when creating your plan.
+
 ## Project Overview
 
 Blog Agent - An AI-powered technical blog writer that generates publication-ready markdown from a title and context. Uses Python + LangGraph with Google Gemini (Flash/Flash-Lite models).

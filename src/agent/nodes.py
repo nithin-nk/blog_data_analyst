@@ -13,12 +13,17 @@ from typing import Any
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from .config import (
+    LLM_MODEL_FULL,
     LLM_MODEL_LITE,
     LLM_TEMPERATURE_LOW,
     LLM_TEMPERATURE_MEDIUM,
+    MAX_RESEARCH_QUERIES_PER_ISSUE,
+    MAX_RESEARCH_URLS_PER_QUERY,
+    MAX_SECTION_RETRIES,
     MAX_VALIDATION_RETRIES,
     MIN_SOURCES_PER_SECTION,
     QUERY_DIVERSIFICATION_MODIFIERS,
+    STYLE_GUIDE,
     TARGET_WORDS_MAP,
 )
 from .key_manager import KeyManager
@@ -1426,6 +1431,8 @@ def _build_critic_prompt(
     target_words: int,
     blog_title: str = "",
     context: str = "",
+    scratchpad: list[dict] | None = None,
+    style_guide: str = STYLE_GUIDE,
 ) -> str:
     """
     Build critic prompt for 8-dimension section evaluation.
@@ -1436,6 +1443,8 @@ def _build_critic_prompt(
         target_words: Target word count for length evaluation
         blog_title: Overall blog title for context
         context: User-provided context about the blog topic
+        scratchpad: Refinement history (ReAct-style) showing previous attempts
+        style_guide: Writing style guidelines for voice evaluation
 
     Returns:
         Critic evaluation prompt
@@ -1455,6 +1464,30 @@ def _build_critic_prompt(
     if context:
         context_info += f"\n- Blog context: {context}"
 
+    # Build refinement history section
+    history_text = ""
+    if scratchpad:
+        history_text = "\n**Refinement History:**\n"
+        for entry in scratchpad:
+            attempt = entry['attempt']
+            score = entry['score']
+            addressed = entry.get('addressed_issues', [])
+            new = entry.get('new_issues', [])
+
+            if attempt == 0:
+                history_text += f"\nAttempt {attempt} (Initial write): Score {score:.1f}/10\n"
+                history_text += f"  Issues identified: {', '.join(entry['issues']) if entry['issues'] else 'None'}\n"
+            else:
+                score_changes = entry.get('score_changes', {})
+                changes_str = ', '.join([f"{k}: {v}" for k, v in score_changes.items() if v != "0"])
+
+                history_text += f"\nAttempt {attempt} (Refinement): Score {score:.1f}/10\n"
+                history_text += f"  Addressed: {', '.join(addressed) if addressed else 'None'}\n"
+                history_text += f"  New issues: {', '.join(new) if new else 'None'}\n"
+                if changes_str:
+                    history_text += f"  Score changes: {changes_str}\n"
+        history_text += "\n"
+
     prompt = f"""You are an expert technical blog critic. Evaluate this section on 8 dimensions (1-10 scale).
 
 **Overall Blog Context:**{context_info}
@@ -1473,6 +1506,17 @@ def _build_critic_prompt(
 
 **Actual word count:** {actual_words}
 
+**Writing Style Guidelines:**
+{style_guide}
+
+Evaluate the "voice" dimension based on adherence to these guidelines:
+- Does it use direct, technical language?
+- Is it opinionated (says "you need" not "you might consider")?
+- Short sentences and paragraphs?
+- Bullet points used effectively?
+- No fluff phrases?
+- Addresses reader as "you"?
+{history_text}
 **Evaluation Criteria:**
 
 1. **technical_accuracy (1-10):** Are technical claims correct? Any misinformation?
@@ -1492,6 +1536,15 @@ For each dimension scoring below 8, create a CriticIssue with:
 - problem: What's wrong
 - suggestion: Specific fix
 
+**For completeness dimension specifically:**
+If section is missing important information that requires additional research (e.g., missing comparisons, benchmarks, examples), set:
+- needs_research = True
+- suggested_queries = ["query 1", "query 2"] (2 specific search queries to find the missing info)
+
+Examples of research-worthy gaps:
+- "Missing Redis vs Memcached comparison" → needs_research=True, queries=["Redis Memcached comparison 2025", "Redis vs Memcached use cases"]
+- "No performance benchmarks provided" → needs_research=True, queries=["[topic] performance benchmarks 2025", "[topic] benchmark comparison"]
+
 Also identify any claims that need fact-checking (quantitative claims, benchmark numbers, version-specific features).
 
 Output as SectionCriticResult with scores, overall_pass, issues, and fact_check_needed.
@@ -1506,6 +1559,7 @@ async def _critic_section(
     key_manager: KeyManager,
     blog_title: str = "",
     context: str = "",
+    scratchpad: list[dict] | None = None,
 ) -> SectionCriticResult:
     """
     Call Gemini Flash-Lite to critique a section.
@@ -1516,6 +1570,7 @@ async def _critic_section(
         key_manager: API key manager
         blog_title: Overall blog title for context
         context: User-provided context about the blog topic
+        scratchpad: Refinement history (ReAct-style) showing previous attempts
 
     Returns:
         SectionCriticResult with scores and feedback
@@ -1528,6 +1583,8 @@ async def _critic_section(
         target_words=target_words,
         blog_title=blog_title,
         context=context,
+        scratchpad=scratchpad,
+        style_guide=STYLE_GUIDE,
     )
 
     # Use Flash-Lite for critic (cheaper, faster)
@@ -1562,6 +1619,261 @@ async def _critic_section(
     )
 
     return result
+
+
+def _build_refiner_prompt(
+    section: dict,
+    content: str,
+    critic_issues: list[dict],
+    scores: dict,
+    scratchpad: list[dict] | None = None,
+    style_guide: str = STYLE_GUIDE,
+    additional_sources: list[dict] | None = None,
+) -> str:
+    """
+    Build refinement prompt for improving a section based on critic feedback.
+
+    Args:
+        section: Section metadata (title, role, target_words)
+        content: Current section content that failed critic
+        critic_issues: List of CriticIssue dicts from SectionCriticResult
+        scores: CriticScore dict with dimension scores
+        scratchpad: Refinement history (ReAct-style) showing previous attempts
+        style_guide: Writing style guidelines
+        additional_sources: Extra sources fetched via dynamic research
+
+    Returns:
+        Refinement prompt string
+    """
+    section_title = section.get("title") or section.get("id", "")
+    section_role = section.get("role", "")
+    target_words = section.get("target_words", 200)
+
+    # Format issues for prompt
+    issues_text = "\n".join([
+        f"**{i+1}. {issue['dimension']}** (score: {scores.get(issue['dimension'], '?')}/10)\n"
+        f"   - Location: {issue['location']}\n"
+        f"   - Problem: {issue['problem']}\n"
+        f"   - Suggestion: {issue['suggestion']}\n"
+        for i, issue in enumerate(critic_issues)
+    ])
+
+    # Calculate average score
+    score_values = list(scores.values())
+    avg_score = sum(score_values) / len(score_values) if score_values else 0
+
+    # Build refinement history
+    history_text = ""
+    if scratchpad:
+        history_text = "\n**Previous Refinement Attempts:**\n"
+        for entry in scratchpad:  # Show all attempts so far
+            attempt = entry['attempt']
+            score = entry['score']
+            addressed = entry.get('addressed_issues', [])
+
+            if attempt == 0:
+                history_text += f"\nAttempt {attempt} (Initial write): Score {score:.1f}/10\n"
+                history_text += f"  Issues: {', '.join(entry['issues']) if entry['issues'] else 'None'}\n"
+            else:
+                history_text += f"\nAttempt {attempt}: Score {score:.1f}/10\n"
+                history_text += f"  Tried to fix: {', '.join(addressed) if addressed else 'Unknown'}\n"
+                history_text += f"  Result: {', '.join(entry['issues']) if entry['issues'] else 'No remaining issues'}\n"
+
+        history_text += "\n**Important:** Learn from previous attempts. Don't repeat the same approach if it didn't work.\n"
+
+    # Build additional sources section (from dynamic research)
+    sources_text = ""
+    if additional_sources:
+        sources_text = "\n**Additional Research (Just Fetched):**\n\n"
+        sources_text += "The critic identified missing information. Here are additional sources to fill the gaps:\n\n"
+        for i, source in enumerate(additional_sources, 1):
+            url = source.get('url', 'Unknown')
+            title = source.get('title', 'Untitled')
+            content = source.get('content', '')
+            # Truncate content to first 500 chars to keep prompt manageable
+            content_preview = content[:500] + "..." if len(content) > 500 else content
+            sources_text += f"{i}. **{title}**\n"
+            sources_text += f"   URL: {url}\n"
+            sources_text += f"   Content: {content_preview}\n\n"
+        sources_text += "**Use these sources to incorporate missing information, comparisons, benchmarks, or examples.**\n"
+
+    prompt = f"""You are refining a technical blog section that did not pass quality review.
+
+**Section Metadata:**
+- Title: {section_title}
+- Role: {section_role}
+- Target words: {target_words}
+
+**Current Content:**
+```markdown
+{content}
+```
+
+**Quality Scores:** {avg_score:.1f}/10 average (need 8.0+ to pass)
+{history_text}
+**Issues to Fix:**
+{issues_text}
+{sources_text}
+**Writing Style Guidelines to Follow:**
+{style_guide}
+
+**Instructions:**
+1. Read the current content carefully
+2. Address EACH issue listed above with the suggested fixes
+3. Preserve parts that are working well (high-scoring dimensions)
+4. Follow the writing style guidelines above (direct, opinionated, short sentences, no fluff)
+5. Keep word count near target ({target_words} words)
+6. Ensure code examples are runnable with imports
+7. Use original insights, not paraphrasing
+8. If additional research sources are provided, incorporate relevant information to fill knowledge gaps
+
+Output ONLY the refined markdown section. Do not include explanations or meta-commentary.
+"""
+
+    return prompt
+
+
+async def _refine_section(
+    section: dict,
+    content: str,
+    critic_result: SectionCriticResult,
+    key_manager: KeyManager,
+    scratchpad: list[dict] | None = None,
+    additional_sources: list[dict] | None = None,
+) -> str:
+    """
+    Refine a section based on critic feedback.
+
+    Args:
+        section: Section metadata
+        content: Current section content that failed
+        critic_result: CriticResult with issues and scores
+        key_manager: API key manager
+        scratchpad: Refinement history (ReAct-style)
+        additional_sources: Extra sources fetched via dynamic research
+
+    Returns:
+        Refined markdown content
+    """
+    # Convert Pydantic models to dicts for prompt
+    issues_list = [issue.model_dump() for issue in critic_result.issues]
+    scores_dict = critic_result.scores.model_dump()
+
+    # Build refinement prompt
+    prompt = _build_refiner_prompt(
+        section=section,
+        content=content,
+        critic_issues=issues_list,
+        scores=scores_dict,
+        scratchpad=scratchpad,
+        style_guide=STYLE_GUIDE,
+        additional_sources=additional_sources,
+    )
+
+    # Use Gemini Flash (same as _write_section)
+    llm = ChatGoogleGenerativeAI(
+        model=LLM_MODEL_FULL,
+        temperature=LLM_TEMPERATURE_LOW,
+        google_api_key=key_manager.get_current_key(),
+    )
+
+    # Run async LLM call
+    loop = asyncio.get_event_loop()
+    refined_content = await loop.run_in_executor(
+        None,
+        lambda: llm.invoke(prompt).content,
+    )
+
+    # Record API usage
+    key_manager.record_usage(success=True)
+
+    logger.info(
+        f"Refined section {section.get('id')}: "
+        f"{len(content)} → {len(refined_content)} chars"
+    )
+
+    return refined_content
+
+
+def _build_scratchpad_entry(
+    attempt: int,
+    critic_result: SectionCriticResult,
+    previous_entry: dict | None = None,
+    research_queries: list[str] | None = None,
+    sources_fetched: int = 0,
+) -> dict:
+    """
+    Build a scratchpad entry from critic result.
+
+    Tracks refinement history for ReAct-style learning:
+    - What score was achieved
+    - Which issues were addressed vs. new
+    - How scores changed per dimension
+    - Whether dynamic research was performed
+
+    Args:
+        attempt: Attempt number (0 = initial write, 1+ = refinements)
+        critic_result: CriticResult with scores and issues
+        previous_entry: Previous scratchpad entry for comparison
+        research_queries: Queries executed for dynamic research (optional)
+        sources_fetched: Number of sources successfully fetched (default 0)
+
+    Returns:
+        Scratchpad entry dict with attempt, score, issues, changes, research info
+    """
+    # Extract scores and calculate average
+    scores_dict = critic_result.scores.model_dump()
+    current_score = sum(scores_dict.values()) / 8
+
+    # Calculate score changes from previous attempt
+    score_changes = {}
+    if previous_entry:
+        prev_scores = previous_entry["scores_breakdown"]
+        for dim, score in scores_dict.items():
+            prev_score = prev_scores.get(dim, score)
+            diff = score - prev_score
+            if diff > 0:
+                score_changes[dim] = f"+{diff}"
+            elif diff < 0:
+                score_changes[dim] = str(diff)
+            else:
+                score_changes[dim] = "0"
+
+    # Extract issue summaries (dimension: problem)
+    issues = [f"{issue.dimension}: {issue.problem}" for issue in critic_result.issues]
+
+    # Determine addressed and new issues
+    addressed_issues = []
+    new_issues = []
+    if previous_entry:
+        prev_issues_set = set(previous_entry["issues"])
+        current_issues_set = set(issues)
+        addressed_issues = list(prev_issues_set - current_issues_set)
+        new_issues = list(current_issues_set - prev_issues_set)
+    else:
+        # First attempt: all issues are new
+        new_issues = issues
+
+    # Build scratchpad entry with research tracking
+    entry = {
+        "attempt": attempt,
+        "score": round(current_score, 2),
+        "scores_breakdown": scores_dict,
+        "score_changes": score_changes,
+        "issues": issues,
+        "addressed_issues": addressed_issues,
+        "new_issues": new_issues,
+    }
+
+    # Add research tracking fields if research was performed
+    if research_queries:
+        entry["research_performed"] = True
+        entry["research_queries"] = research_queries
+        entry["sources_fetched"] = sources_fetched
+    else:
+        entry["research_performed"] = False
+
+    return entry
 
 
 async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
@@ -1631,25 +1943,161 @@ async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
         )
         logger.info(f"Section '{section_title}' written ({len(content.split())} words)")
 
-        # Critique the section
+        # Initialize scratchpad for refinement tracking
+        scratchpad = []
+
+        # Critique the section with scratchpad context
         critic_result = await _critic_section(
             section=section,
             content=content,
             key_manager=key_manager,
             blog_title=blog_title,
             context=state.get("context", ""),
+            scratchpad=scratchpad,
         )
+
+        # Add initial entry to scratchpad
+        scratchpad.append(_build_scratchpad_entry(0, critic_result))
+
+        initial_score = scratchpad[0]["score"]
         logger.info(
-            f"Critic for {section_id}: pass={critic_result.overall_pass}, "
-            f"issues={len(critic_result.issues)}"
+            f"Critic for {section_id} (attempt 0): pass={critic_result.overall_pass}, "
+            f"score={initial_score:.1f}/10, issues={len(critic_result.issues)}"
         )
 
-        # Save to section_drafts
-        section_drafts[section_id] = content
+        # Refine loop: improve section if it failed quality gate
+        retry_count = 0
+        best_content = content
+        best_score = initial_score
+        best_critic_result = critic_result
 
-        # Save critic result
+        while not critic_result.overall_pass and retry_count < MAX_SECTION_RETRIES:
+            retry_count += 1
+            logger.info(
+                f"Section '{section_id}' failed quality gate (score {best_score:.1f}/10). "
+                f"Refining... (attempt {retry_count}/{MAX_SECTION_RETRIES})"
+            )
+
+            # Check if any issues need dynamic research
+            additional_sources = []
+            research_queries_executed = []
+
+            for issue in critic_result.issues:
+                if issue.needs_research and issue.suggested_queries:
+                    logger.info(
+                        f"Dynamic research triggered for issue: {issue.dimension} - {issue.problem}"
+                    )
+
+                    # Execute suggested queries (limit to MAX_RESEARCH_QUERIES_PER_ISSUE)
+                    for query in issue.suggested_queries[:MAX_RESEARCH_QUERIES_PER_ISSUE]:
+                        logger.info(f"Searching: {query}")
+                        research_queries_executed.append(query)
+
+                        # Search DuckDuckGo
+                        search_results = await search_duckduckgo(query)
+
+                        # Fetch content from top URLs
+                        for result in search_results[:MAX_RESEARCH_URLS_PER_QUERY]:
+                            url = result.get('url', '')
+                            if not url:
+                                continue
+
+                            logger.info(f"Fetching: {url}")
+                            content_result = await fetch_url_content(url)
+
+                            if content_result and content_result.get('content'):
+                                additional_sources.append({
+                                    'url': url,
+                                    'title': result.get('title', 'Untitled'),
+                                    'content': content_result['content'],
+                                })
+                                logger.info(
+                                    f"Fetched {len(content_result['content'])} chars from {url}"
+                                )
+
+            if additional_sources:
+                logger.info(
+                    f"Dynamic research: {len(research_queries_executed)} queries, "
+                    f"{len(additional_sources)} sources fetched"
+                )
+
+            # Refine content using critic feedback + scratchpad history + additional sources
+            content = await _refine_section(
+                section=section,
+                content=content,
+                critic_result=critic_result,
+                key_manager=key_manager,
+                scratchpad=scratchpad,
+                additional_sources=additional_sources if additional_sources else None,
+            )
+
+            # Re-evaluate refined content with scratchpad context
+            critic_result = await _critic_section(
+                section=section,
+                content=content,
+                key_manager=key_manager,
+                blog_title=blog_title,
+                context=state.get("context", ""),
+                scratchpad=scratchpad,
+            )
+
+            # Add refinement entry to scratchpad with research tracking
+            scratchpad.append(
+                _build_scratchpad_entry(
+                    retry_count,
+                    critic_result,
+                    scratchpad[-1],
+                    research_queries=research_queries_executed if research_queries_executed else None,
+                    sources_fetched=len(additional_sources),
+                )
+            )
+
+            # Track best version
+            current_score = scratchpad[-1]["score"]
+            if current_score > best_score:
+                best_score = current_score
+                best_content = content
+                best_critic_result = critic_result
+                logger.info(f"Refinement improved score: {best_score:.1f}/10")
+            else:
+                logger.info(
+                    f"Refinement did not improve score: {current_score:.1f}/10 "
+                    f"(best: {best_score:.1f}/10)"
+                )
+
+        # Use best version (either passed or best attempt)
+        if critic_result.overall_pass:
+            final_content = content
+            final_critic_result = critic_result
+            logger.info(
+                f"Section '{section_id}' passed quality gate after {retry_count} refinement(s) "
+                f"(final score: {scratchpad[-1]['score']:.1f}/10)"
+            )
+        else:
+            final_content = best_content
+            final_critic_result = best_critic_result
+            logger.warning(
+                f"Section '{section_id}' did not pass after {retry_count} refinement(s). "
+                f"Using best version (score {best_score:.1f}/10)"
+            )
+
+        # Save scratchpad to disk
+        if job_id:
+            job_manager = JobManager()
+            refinement_log_path = job_manager.get_job_dir(job_id) / "refinement_logs"
+            refinement_log_path.mkdir(exist_ok=True)
+            log_file = refinement_log_path / f"section_{section_id}_log.json"
+            import json
+            with open(log_file, "w") as f:
+                json.dump(scratchpad, f, indent=2)
+            logger.info(f"Saved refinement log to {log_file}")
+
+        # Save to section_drafts (use final_content, not content)
+        section_drafts[section_id] = final_content
+
+        # Save critic result (use final_critic_result to match final_content)
         section_reviews = dict(state.get("section_reviews", {}))
-        section_reviews[section_id] = critic_result.model_dump()
+        section_reviews[section_id] = final_critic_result.model_dump()
 
         # Save checkpoint
         if job_id:
