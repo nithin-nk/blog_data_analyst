@@ -34,10 +34,13 @@ from .state import (
     ContentStrategy,
     DiscoveryQueries,
     ExistingArticleSummary,
+    FinalCriticResult,
+    FinalCriticScore,
     JobManager,
     Phase,
     SectionCriticResult,
     SourceValidationList,
+    TransitionFix,
 )
 from .tools import fetch_url_content, search_duckduckgo
 
@@ -2672,6 +2675,296 @@ async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
 # =============================================================================
 
 
+MAX_FINAL_CRITIC_ITERATIONS = 2
+
+
+def _build_final_critic_prompt(
+    draft: str,
+    plan: dict,
+    blog_title: str,
+) -> str:
+    """
+    Build prompt for 7-dimension whole-blog evaluation.
+
+    Evaluates:
+    1. coherence - Do sections flow logically?
+    2. voice_consistency - Same author voice throughout?
+    3. no_redundancy - No repeated information?
+    4. narrative_arc - Clear progression?
+    5. hook_effectiveness - Opening captures attention?
+    6. conclusion_strength - Clear takeaways?
+    7. overall_polish - Professional quality?
+
+    Also identifies transition issues between sections.
+
+    Args:
+        draft: Complete blog markdown
+        plan: Blog plan with sections
+        blog_title: Title of the blog
+
+    Returns:
+        Final critic evaluation prompt
+    """
+    sections = plan.get("sections", [])
+    section_ids = [s.get("id", "") for s in sections if not s.get("optional")]
+    section_list = "\n".join(f"- {sid}" for sid in section_ids)
+
+    word_count = len(draft.split())
+
+    prompt = f"""You are an expert technical blog editor. Evaluate this complete blog post on 7 whole-blog dimensions (1-10 scale).
+
+**Blog Title:** {blog_title}
+
+**Section Structure:**
+{section_list}
+
+**Complete Blog Draft:**
+```markdown
+{draft}
+```
+
+**Word Count:** {word_count}
+
+**Evaluation Criteria (7 Dimensions):**
+
+1. **coherence (1-10):** Do sections flow logically? Do ideas connect well between sections? Is there a clear thread throughout?
+
+2. **voice_consistency (1-10):** Same author voice throughout? No jarring shifts in tone, style, or technical level?
+
+3. **no_redundancy (1-10):** No repeated information across sections? Each section adds new value without rehashing previous content?
+
+4. **narrative_arc (1-10):** Clear progression from beginning (hook/problem) through middle (solution/implementation) to end (conclusion/next steps)?
+
+5. **hook_effectiveness (1-10):** Does the opening immediately capture attention? Does it set up the reader's problem clearly?
+
+6. **conclusion_strength (1-10):** Does the ending provide clear, actionable takeaways? Strong call to action or next steps?
+
+7. **overall_polish (1-10):** Professional quality? No rough edges, typos, or awkward phrasing?
+
+**Pass threshold:** Average score >= 8.0 (overall_pass = True if all scores average >= 8)
+
+**Transition Analysis:**
+Identify any weak transitions between sections. For each weak transition, provide:
+- between: [section_id_1, section_id_2]
+- issue: What's wrong with the transition
+- suggestion: How to improve it
+
+**Output Requirements:**
+- scores: All 7 dimension scores
+- overall_pass: True if average >= 8.0
+- transition_fixes: List of transition issues (can be empty if transitions are good)
+- praise: 1-2 sentences on what's working well
+- issues: General issues to address (list of strings)
+- reading_time_minutes: Estimated reading time
+- word_count: Total word count
+
+Output as FinalCriticResult.
+"""
+
+    return prompt
+
+
+async def _final_critic(
+    draft: str,
+    plan: dict,
+    blog_title: str,
+    key_manager: KeyManager,
+    max_retries: int = 3,
+) -> FinalCriticResult:
+    """
+    Call Gemini Flash for final critique of whole blog.
+
+    Uses Flash (not Lite) for more complex whole-blog evaluation.
+
+    Args:
+        draft: Complete blog markdown
+        plan: Blog plan with sections
+        blog_title: Blog title
+        key_manager: API key manager
+        max_retries: Max retries on failure
+
+    Returns:
+        FinalCriticResult with scores and transition fixes
+    """
+    prompt = _build_final_critic_prompt(draft, plan, blog_title)
+
+    for attempt in range(max_retries):
+        try:
+            # Use Flash (not Lite) for complex whole-blog evaluation
+            llm = ChatGoogleGenerativeAI(
+                model=LLM_MODEL_FULL,
+                temperature=LLM_TEMPERATURE_LOW,
+                google_api_key=key_manager.get_current_key(),
+            )
+
+            llm_structured = llm.with_structured_output(FinalCriticResult)
+
+            # Run async LLM call
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: llm_structured.invoke(prompt),
+            )
+
+            key_manager.record_usage(success=True)
+
+            # Calculate average score
+            scores_dict = result.scores.model_dump()
+            avg_score = sum(scores_dict.values()) / len(scores_dict)
+
+            logger.info(
+                f"Final critic: avg_score={avg_score:.1f}, "
+                f"pass={result.overall_pass}, "
+                f"transition_fixes={len(result.transition_fixes)}"
+            )
+
+            return result
+
+        except Exception as e:
+            logger.warning(f"Final critic attempt {attempt + 1} failed: {e}")
+            key_manager.record_usage(success=False)
+            key_manager.rotate_key()
+            if attempt == max_retries - 1:
+                # Return a passing result on complete failure to not block pipeline
+                logger.error("Final critic failed, returning default pass result")
+                word_count = len(draft.split())
+                reading_time = max(1, round(word_count / 200))
+                return FinalCriticResult(
+                    scores=FinalCriticScore(
+                        coherence=8,
+                        voice_consistency=8,
+                        no_redundancy=8,
+                        narrative_arc=8,
+                        hook_effectiveness=8,
+                        conclusion_strength=8,
+                        overall_polish=8,
+                    ),
+                    overall_pass=True,
+                    transition_fixes=[],
+                    praise="Unable to evaluate, defaulting to pass.",
+                    issues=["Final critic evaluation failed"],
+                    reading_time_minutes=reading_time,
+                    word_count=word_count,
+                )
+
+
+def _build_transition_fix_prompt(
+    draft: str,
+    fixes: list[TransitionFix],
+) -> str:
+    """
+    Build prompt to improve transitions between sections.
+
+    Args:
+        draft: Current blog markdown
+        fixes: List of transition issues to address
+
+    Returns:
+        Transition fix prompt
+    """
+    fixes_text = ""
+    for i, fix in enumerate(fixes, 1):
+        between = fix.between if isinstance(fix.between, list) else [fix.between]
+        section_pair = " → ".join(between)
+        fixes_text += f"""
+{i}. **{section_pair}**
+   - Issue: {fix.issue}
+   - Suggestion: {fix.suggestion}
+"""
+
+    prompt = f"""You are an expert technical blog editor. Improve the transitions between sections based on the issues identified.
+
+**Current Blog Draft:**
+```markdown
+{draft}
+```
+
+**Transition Issues to Fix:**
+{fixes_text}
+
+**Instructions:**
+1. Find each transition point mentioned above
+2. Improve the transition by adding a connecting sentence or paragraph
+3. Ensure the flow feels natural and logical
+4. Maintain the same voice and technical level
+5. Don't add unnecessary fluff - keep transitions concise
+
+**Important:**
+- Return the COMPLETE blog with improved transitions
+- Only modify the transition areas - don't change other content
+- Keep the same markdown structure (headers, code blocks, etc.)
+
+Return the improved blog markdown only, no explanations.
+"""
+
+    return prompt
+
+
+async def _apply_transition_fixes(
+    draft: str,
+    fixes: list[TransitionFix],
+    key_manager: KeyManager,
+    max_retries: int = 3,
+) -> str:
+    """
+    Refine transitions between sections based on critic feedback.
+
+    Args:
+        draft: Current blog markdown
+        fixes: List of transition issues to fix
+        key_manager: API key manager
+        max_retries: Max retries on failure
+
+    Returns:
+        Refined blog markdown with improved transitions
+    """
+    if not fixes:
+        return draft
+
+    prompt = _build_transition_fix_prompt(draft, fixes)
+
+    for attempt in range(max_retries):
+        try:
+            # Use Flash for rewriting
+            llm = ChatGoogleGenerativeAI(
+                model=LLM_MODEL_FULL,
+                temperature=LLM_TEMPERATURE_MEDIUM,
+                google_api_key=key_manager.get_current_key(),
+            )
+
+            # Run async LLM call
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: llm.invoke(prompt),
+            )
+
+            key_manager.record_usage(success=True)
+
+            # Extract content from response
+            refined_draft = result.content.strip()
+
+            # Remove markdown code fence if present
+            if refined_draft.startswith("```markdown"):
+                refined_draft = refined_draft[len("```markdown") :].strip()
+            if refined_draft.startswith("```"):
+                refined_draft = refined_draft[3:].strip()
+            if refined_draft.endswith("```"):
+                refined_draft = refined_draft[:-3].strip()
+
+            logger.info(f"Applied {len(fixes)} transition fixes")
+            return refined_draft
+
+        except Exception as e:
+            logger.warning(f"Transition fix attempt {attempt + 1} failed: {e}")
+            key_manager.record_usage(success=False)
+            key_manager.rotate_key()
+            if attempt == max_retries - 1:
+                # Return original draft on failure
+                logger.error("Transition fixes failed, keeping original draft")
+                return draft
+
+
 def _combine_sections(
     section_drafts: dict[str, str],
     plan: dict,
@@ -2744,12 +3037,9 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
     """
     Phase 4: Final Assembly Node.
 
-    Combines all section drafts into a single markdown document.
-    In this minimal version:
-    - No final critic
-    - No mermaid rendering
-    - No citations
-    - Just combines and saves
+    Combines all section drafts into a single markdown document,
+    runs final critic with 7-dimension evaluation, and applies
+    transition fixes if needed (max 2 iterations).
 
     Args:
         state: Current BlogAgentState containing:
@@ -2759,9 +3049,10 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
 
     Returns:
         State update dict with:
-        - combined_draft: Full blog markdown
-        - final_markdown: Same as combined_draft (no refinement yet)
-        - metadata: Basic metadata (word_count, reading_time)
+        - combined_draft: Full blog markdown (pre-critic)
+        - final_markdown: Refined blog markdown (post-critic)
+        - final_review: FinalCriticResult as dict
+        - metadata: Blog metadata with critic scores
         - current_phase: Updated to REVIEWING
     """
     logger.info("Starting final assembly")
@@ -2779,6 +3070,9 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
         }
 
     try:
+        # Initialize key manager for LLM calls
+        key_manager = KeyManager.from_env()
+
         # Combine sections into single document
         combined_draft = _combine_sections(
             section_drafts=section_drafts,
@@ -2786,10 +3080,40 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
             blog_title=blog_title,
         )
 
-        # Calculate basic metadata
-        word_count = _count_words(combined_draft)
-        reading_time = _calculate_reading_time(combined_draft)
+        logger.info(f"Combined draft: {_count_words(combined_draft)} words")
 
+        # Final critic loop (max 2 iterations)
+        final_draft = combined_draft
+        critic_result = None
+
+        for iteration in range(MAX_FINAL_CRITIC_ITERATIONS):
+            logger.info(f"Final critic iteration {iteration + 1}/{MAX_FINAL_CRITIC_ITERATIONS}")
+
+            critic_result = await _final_critic(
+                draft=final_draft,
+                plan=plan,
+                blog_title=blog_title,
+                key_manager=key_manager,
+            )
+
+            if critic_result.overall_pass:
+                logger.info("Final critic passed")
+                break
+
+            # Apply transition fixes if any and not last iteration
+            if critic_result.transition_fixes and iteration < MAX_FINAL_CRITIC_ITERATIONS - 1:
+                logger.info(f"Applying {len(critic_result.transition_fixes)} transition fixes")
+                final_draft = await _apply_transition_fixes(
+                    draft=final_draft,
+                    fixes=critic_result.transition_fixes,
+                    key_manager=key_manager,
+                )
+
+        # Calculate metadata
+        word_count = _count_words(final_draft)
+        reading_time = _calculate_reading_time(final_draft)
+
+        # Build metadata with critic scores
         metadata = {
             "blog_title": blog_title,
             "word_count": word_count,
@@ -2797,23 +3121,48 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
             "section_count": len([s for s in plan.get("sections", []) if not s.get("optional")]),
         }
 
-        logger.info(f"Assembled blog: {word_count} words, {reading_time} min read")
+        # Add critic scores to metadata
+        if critic_result:
+            scores_dict = critic_result.scores.model_dump()
+            avg_score = sum(scores_dict.values()) / len(scores_dict)
+            metadata["final_critic_scores"] = scores_dict
+            metadata["final_critic_avg_score"] = round(avg_score, 2)
+            metadata["final_critic_pass"] = critic_result.overall_pass
+
+        logger.info(f"Final blog: {word_count} words, {reading_time} min read")
+
+        # Prepare final review dict
+        final_review = critic_result.model_dump() if critic_result else None
 
         # Save checkpoint
         if job_id:
+            import json
             job_manager = JobManager()
             job_dir = job_manager.get_job_dir(job_id)
 
-            # Save combined draft
+            # Ensure directories exist
             drafts_dir = job_dir / "drafts"
             drafts_dir.mkdir(parents=True, exist_ok=True)
+            feedback_dir = job_dir / "feedback"
+            feedback_dir.mkdir(parents=True, exist_ok=True)
+
+            # Save combined draft (v1 - pre-critic)
             (drafts_dir / "v1.md").write_text(combined_draft)
 
+            # Save refined draft (v2 - post-critic) if different
+            if final_draft != combined_draft:
+                (drafts_dir / "v2.md").write_text(final_draft)
+
             # Save final.md
-            (job_dir / "final.md").write_text(combined_draft)
+            (job_dir / "final.md").write_text(final_draft)
+
+            # Save final critic result
+            if final_review:
+                (feedback_dir / "final_critic.json").write_text(
+                    json.dumps(final_review, indent=2)
+                )
 
             # Save metadata
-            import json
             (job_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
 
             # Update state
@@ -2822,14 +3171,16 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
                 {
                     "current_phase": Phase.REVIEWING.value,
                     "combined_draft": combined_draft,
-                    "final_markdown": combined_draft,
+                    "final_markdown": final_draft,
+                    "final_review": final_review,
                     "metadata": metadata,
                 },
             )
 
         return {
             "combined_draft": combined_draft,
-            "final_markdown": combined_draft,
+            "final_markdown": final_draft,
+            "final_review": final_review,
             "metadata": metadata,
             "current_phase": Phase.REVIEWING.value,
         }

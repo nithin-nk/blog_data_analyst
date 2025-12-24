@@ -193,6 +193,53 @@ class SectionCriticResult(BaseModel):
     )
 
 
+# =============================================================================
+# Final Critic Models (Slice 6.7)
+# =============================================================================
+
+
+class FinalCriticScore(BaseModel):
+    """7 whole-blog dimensions (1-10 scale)."""
+
+    coherence: int = Field(ge=1, le=10, description="Sections flow logically, ideas connect")
+    voice_consistency: int = Field(
+        ge=1, le=10, description="Same author voice throughout"
+    )
+    no_redundancy: int = Field(
+        ge=1, le=10, description="No repeated information across sections"
+    )
+    narrative_arc: int = Field(
+        ge=1, le=10, description="Clear beginning, middle, end progression"
+    )
+    hook_effectiveness: int = Field(ge=1, le=10, description="Opening captures attention")
+    conclusion_strength: int = Field(
+        ge=1, le=10, description="Ending provides clear takeaways"
+    )
+    overall_polish: int = Field(
+        ge=1, le=10, description="Professional quality, no rough edges"
+    )
+
+
+class TransitionFix(BaseModel):
+    """Fix needed between sections."""
+
+    between: list[str] = Field(description="Two section IDs where transition is weak")
+    issue: str = Field(description="What's wrong with the transition")
+    suggestion: str = Field(description="How to fix it")
+
+
+class FinalCriticResult(BaseModel):
+    """Full final critic evaluation."""
+
+    scores: FinalCriticScore
+    overall_pass: bool = Field(description="True if average of all scores >= 8")
+    transition_fixes: list[TransitionFix] = Field(default_factory=list)
+    praise: str = Field(default="", description="What's working well")
+    issues: list[str] = Field(default_factory=list, description="General issues to address")
+    reading_time_minutes: int = Field(ge=1, description="Estimated reading time")
+    word_count: int = Field(ge=0, description="Total word count")
+
+
 class SourceValidation(BaseModel):
     """Validation result for a single source."""
 

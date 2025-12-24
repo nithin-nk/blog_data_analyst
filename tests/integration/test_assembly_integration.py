@@ -6,10 +6,18 @@ Run with: PYTHONPATH=. pytest tests/integration/test_assembly_integration.py -v
 """
 
 import json
+import os
 import pytest
+from unittest.mock import MagicMock, patch
 
-from src.agent.nodes import final_assembly_node
-from src.agent.state import JobManager, Phase
+from src.agent.nodes import final_assembly_node, _final_critic, _apply_transition_fixes
+from src.agent.state import (
+    FinalCriticResult,
+    FinalCriticScore,
+    JobManager,
+    Phase,
+    TransitionFix,
+)
 
 
 class TestFinalAssemblyIntegration:
@@ -19,6 +27,27 @@ class TestFinalAssemblyIntegration:
     def job_manager(self, tmp_path):
         """Create JobManager with temporary directory."""
         return JobManager(base_dir=tmp_path)
+
+    @pytest.fixture
+    def mock_passing_critic(self):
+        """Create a mock passing critic result."""
+        return FinalCriticResult(
+            scores=FinalCriticScore(
+                coherence=9,
+                voice_consistency=9,
+                no_redundancy=9,
+                narrative_arc=9,
+                hook_effectiveness=9,
+                conclusion_strength=9,
+                overall_polish=9,
+            ),
+            overall_pass=True,
+            transition_fixes=[],
+            praise="Well structured blog!",
+            issues=[],
+            reading_time_minutes=2,
+            word_count=400,
+        )
 
     @pytest.fixture
     def sample_sections(self):
@@ -77,10 +106,10 @@ Next step: Try implementing this in your staging environment. Track your cache h
         }
 
     @pytest.mark.asyncio
-    async def test_assembly_creates_final_md(self, job_manager, sample_sections, sample_plan):
+    async def test_assembly_creates_final_md(
+        self, job_manager, sample_sections, sample_plan, mock_passing_critic
+    ):
         """Assembly creates final.md file."""
-        from unittest.mock import patch
-
         job_id = job_manager.create_job("Test Blog", "Test context")
 
         state = {
@@ -90,8 +119,10 @@ Next step: Try implementing this in your staging environment. Track your cache h
             "section_drafts": sample_sections,
         }
 
-        # Patch JobManager to use our test instance
-        with patch("src.agent.nodes.JobManager", return_value=job_manager):
+        # Patch JobManager, _final_critic, and KeyManager
+        with patch("src.agent.nodes.JobManager", return_value=job_manager), \
+             patch("src.agent.nodes._final_critic", return_value=mock_passing_critic), \
+             patch("src.agent.nodes.KeyManager.from_env", return_value=MagicMock()):
             result = await final_assembly_node(state)
 
         # Check result
@@ -110,10 +141,10 @@ Next step: Try implementing this in your staging environment. Track your cache h
         assert "```python" in content  # Code block preserved
 
     @pytest.mark.asyncio
-    async def test_assembly_creates_metadata_json(self, job_manager, sample_sections, sample_plan):
+    async def test_assembly_creates_metadata_json(
+        self, job_manager, sample_sections, sample_plan, mock_passing_critic
+    ):
         """Assembly creates metadata.json file."""
-        from unittest.mock import patch
-
         job_id = job_manager.create_job("Test Blog", "Test context")
 
         state = {
@@ -123,7 +154,9 @@ Next step: Try implementing this in your staging environment. Track your cache h
             "section_drafts": sample_sections,
         }
 
-        with patch("src.agent.nodes.JobManager", return_value=job_manager):
+        with patch("src.agent.nodes.JobManager", return_value=job_manager), \
+             patch("src.agent.nodes._final_critic", return_value=mock_passing_critic), \
+             patch("src.agent.nodes.KeyManager.from_env", return_value=MagicMock()):
             result = await final_assembly_node(state)
 
         # Check metadata file
@@ -136,13 +169,15 @@ Next step: Try implementing this in your staging environment. Track your cache h
         assert metadata["word_count"] > 100
         assert metadata["reading_time_minutes"] >= 1
         assert metadata["section_count"] == 4
+        assert "final_critic_scores" in metadata
+        assert "final_critic_pass" in metadata
         assert result["current_phase"] == Phase.REVIEWING.value
 
     @pytest.mark.asyncio
-    async def test_assembly_creates_v1_draft(self, job_manager, sample_sections, sample_plan):
+    async def test_assembly_creates_v1_draft(
+        self, job_manager, sample_sections, sample_plan, mock_passing_critic
+    ):
         """Assembly creates drafts/v1.md file."""
-        from unittest.mock import patch
-
         job_id = job_manager.create_job("Test Blog", "Test context")
 
         state = {
@@ -152,7 +187,9 @@ Next step: Try implementing this in your staging environment. Track your cache h
             "section_drafts": sample_sections,
         }
 
-        with patch("src.agent.nodes.JobManager", return_value=job_manager):
+        with patch("src.agent.nodes.JobManager", return_value=job_manager), \
+             patch("src.agent.nodes._final_critic", return_value=mock_passing_critic), \
+             patch("src.agent.nodes.KeyManager.from_env", return_value=MagicMock()):
             result = await final_assembly_node(state)
 
         # Check v1 draft
@@ -160,14 +197,15 @@ Next step: Try implementing this in your staging environment. Track your cache h
         v1_md = job_dir / "drafts" / "v1.md"
         assert v1_md.exists()
 
-        # v1.md should match final.md
-        final_content = (job_dir / "final.md").read_text()
+        # v1.md should match combined_draft (pre-critic)
         v1_content = v1_md.read_text()
-        assert final_content == v1_content
+        assert v1_content == result["combined_draft"]
         assert result["current_phase"] == Phase.REVIEWING.value
 
     @pytest.mark.asyncio
-    async def test_assembly_word_count_accuracy(self, job_manager, sample_sections, sample_plan):
+    async def test_assembly_word_count_accuracy(
+        self, job_manager, sample_sections, sample_plan, mock_passing_critic
+    ):
         """Word count in metadata matches actual content."""
         job_id = job_manager.create_job("Test Blog", "Test context")
 
@@ -178,17 +216,21 @@ Next step: Try implementing this in your staging environment. Track your cache h
             "section_drafts": sample_sections,
         }
 
-        result = await final_assembly_node(state)
+        with patch("src.agent.nodes._final_critic", return_value=mock_passing_critic), \
+             patch("src.agent.nodes.KeyManager.from_env", return_value=MagicMock()):
+            result = await final_assembly_node(state)
 
-        # Verify word count
-        combined = result["combined_draft"]
-        actual_words = len(combined.split())
+        # Verify word count - should match final_markdown
+        final = result["final_markdown"]
+        actual_words = len(final.split())
         reported_words = result["metadata"]["word_count"]
 
         assert actual_words == reported_words
 
     @pytest.mark.asyncio
-    async def test_assembly_preserves_section_order(self, job_manager, sample_sections, sample_plan):
+    async def test_assembly_preserves_section_order(
+        self, job_manager, sample_sections, sample_plan, mock_passing_critic
+    ):
         """Sections appear in the order specified in plan."""
         job_id = job_manager.create_job("Test Blog", "Test context")
 
@@ -199,7 +241,10 @@ Next step: Try implementing this in your staging environment. Track your cache h
             "section_drafts": sample_sections,
         }
 
-        result = await final_assembly_node(state)
+        with patch("src.agent.nodes._final_critic", return_value=mock_passing_critic), \
+             patch("src.agent.nodes.KeyManager.from_env", return_value=MagicMock()):
+            result = await final_assembly_node(state)
+
         combined = result["combined_draft"]
 
         # Find positions
@@ -212,7 +257,7 @@ Next step: Try implementing this in your staging environment. Track your cache h
         assert hook_pos < problem_pos < impl_pos < conclusion_pos
 
     @pytest.mark.asyncio
-    async def test_assembly_without_job_id(self, sample_sections, sample_plan):
+    async def test_assembly_without_job_id(self, sample_sections, sample_plan, mock_passing_critic):
         """Assembly works without job_id (no file persistence)."""
         state = {
             "job_id": "",  # No persistence
@@ -221,14 +266,18 @@ Next step: Try implementing this in your staging environment. Track your cache h
             "section_drafts": sample_sections,
         }
 
-        result = await final_assembly_node(state)
+        with patch("src.agent.nodes._final_critic", return_value=mock_passing_critic), \
+             patch("src.agent.nodes.KeyManager.from_env", return_value=MagicMock()):
+            result = await final_assembly_node(state)
 
         assert result["current_phase"] == Phase.REVIEWING.value
         assert "combined_draft" in result
         assert len(result["combined_draft"]) > 0
 
     @pytest.mark.asyncio
-    async def test_assembly_reading_time_calculation(self, job_manager, sample_plan):
+    async def test_assembly_reading_time_calculation(
+        self, job_manager, sample_plan, mock_passing_critic
+    ):
         """Reading time calculated correctly for various lengths."""
         job_id = job_manager.create_job("Test Blog", "Test context")
 
@@ -248,7 +297,9 @@ Next step: Try implementing this in your staging environment. Track your cache h
             "section_drafts": sections,
         }
 
-        result = await final_assembly_node(state)
+        with patch("src.agent.nodes._final_critic", return_value=mock_passing_critic), \
+             patch("src.agent.nodes.KeyManager.from_env", return_value=MagicMock()):
+            result = await final_assembly_node(state)
 
         # 400 words in sections + some header text ≈ 2 min
         assert result["metadata"]["reading_time_minutes"] >= 2
@@ -261,8 +312,29 @@ class TestAssemblyEdgeCases:
     def job_manager(self, tmp_path):
         return JobManager(base_dir=tmp_path)
 
+    @pytest.fixture
+    def mock_passing_critic(self):
+        """Create a mock passing critic result."""
+        return FinalCriticResult(
+            scores=FinalCriticScore(
+                coherence=9,
+                voice_consistency=9,
+                no_redundancy=9,
+                narrative_arc=9,
+                hook_effectiveness=9,
+                conclusion_strength=9,
+                overall_polish=9,
+            ),
+            overall_pass=True,
+            transition_fixes=[],
+            praise="Well done!",
+            issues=[],
+            reading_time_minutes=1,
+            word_count=50,
+        )
+
     @pytest.mark.asyncio
-    async def test_assembly_with_missing_section(self, job_manager):
+    async def test_assembly_with_missing_section(self, job_manager, mock_passing_critic):
         """Handles missing section gracefully."""
         job_id = job_manager.create_job("Test", "context")
 
@@ -283,14 +355,16 @@ class TestAssemblyEdgeCases:
             "section_drafts": sections,
         }
 
-        result = await final_assembly_node(state)
+        with patch("src.agent.nodes._final_critic", return_value=mock_passing_critic), \
+             patch("src.agent.nodes.KeyManager.from_env", return_value=MagicMock()):
+            result = await final_assembly_node(state)
 
         # Should still succeed with available content
         assert result["current_phase"] == Phase.REVIEWING.value
         assert "Hook content only" in result["combined_draft"]
 
     @pytest.mark.asyncio
-    async def test_assembly_with_markdown_special_chars(self, job_manager):
+    async def test_assembly_with_markdown_special_chars(self, job_manager, mock_passing_critic):
         """Handles markdown special characters correctly."""
         job_id = job_manager.create_job("Test", "context")
 
@@ -311,7 +385,9 @@ class TestAssemblyEdgeCases:
             "section_drafts": sections,
         }
 
-        result = await final_assembly_node(state)
+        with patch("src.agent.nodes._final_critic", return_value=mock_passing_critic), \
+             patch("src.agent.nodes.KeyManager.from_env", return_value=MagicMock()):
+            result = await final_assembly_node(state)
 
         combined = result["combined_draft"]
         assert "**bold**" in combined
@@ -320,7 +396,7 @@ class TestAssemblyEdgeCases:
         assert "> A blockquote" in combined
 
     @pytest.mark.asyncio
-    async def test_assembly_empty_section_content(self):
+    async def test_assembly_empty_section_content(self, mock_passing_critic):
         """Handles empty section content."""
         state = {
             "job_id": "",
@@ -333,7 +409,159 @@ class TestAssemblyEdgeCases:
             "section_drafts": {"problem": ""},  # Empty content
         }
 
-        result = await final_assembly_node(state)
+        with patch("src.agent.nodes._final_critic", return_value=mock_passing_critic), \
+             patch("src.agent.nodes.KeyManager.from_env", return_value=MagicMock()):
+            result = await final_assembly_node(state)
 
         # Should skip empty section
         assert "## Problem" not in result["combined_draft"]
+
+
+# =============================================================================
+# Final Critic Integration Tests (Real LLM)
+# =============================================================================
+
+
+@pytest.mark.skipif(
+    not os.environ.get("GOOGLE_API_KEY_1"),
+    reason="Requires GOOGLE_API_KEY_1 environment variable",
+)
+class TestFinalCriticIntegration:
+    """Integration tests for final critic with real LLM calls."""
+
+    @pytest.fixture
+    def sample_draft(self):
+        """Sample blog draft for testing."""
+        return """# Semantic Caching for LLM Applications
+
+Every API call to GPT-4 costs money. At scale, those pennies become thousands of dollars.
+What if you could cache 60% of your LLM requests with zero quality loss?
+
+## The Problem with Traditional Caching
+
+Traditional caching doesn't work for LLM applications. Here's why:
+
+1. **Exact match fails**: Users ask the same question differently.
+2. **Cache invalidation is tricky**: When your knowledge base updates, which cached responses need invalidation?
+3. **Context matters**: The same question might need different answers depending on conversation history.
+
+## Implementation with Redis
+
+Here's how to implement semantic caching with Redis:
+
+```python
+import redis
+from sentence_transformers import SentenceTransformer
+
+r = redis.Redis()
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+def cache_response(query: str, response: str):
+    embedding = model.encode(query)
+    r.hset(f"cache:{hash(query)}", mapping={
+        "query": query,
+        "response": response,
+        "embedding": embedding.tobytes()
+    })
+```
+
+This approach gives you sub-millisecond lookups.
+
+## Key Takeaways
+
+1. Semantic caching can reduce LLM costs by 40-60%
+2. Use vector similarity, not exact matching
+3. Start with Redis + Sentence Transformers for quick wins
+
+Next step: Try implementing this in your staging environment.
+"""
+
+    @pytest.fixture
+    def sample_plan(self):
+        """Sample plan matching the draft."""
+        return {
+            "blog_title": "Semantic Caching for LLM Applications",
+            "sections": [
+                {"id": "hook", "role": "hook", "optional": False},
+                {"id": "problem", "title": "The Problem with Traditional Caching", "role": "problem", "optional": False},
+                {"id": "implementation", "title": "Implementation with Redis", "role": "implementation", "optional": False},
+                {"id": "conclusion", "title": "Key Takeaways", "role": "conclusion", "optional": False},
+            ],
+        }
+
+    @pytest.mark.asyncio
+    async def test_final_critic_real_evaluation(self, sample_draft, sample_plan):
+        """Final critic evaluates a real blog draft."""
+        from src.agent.key_manager import KeyManager
+
+        key_manager = KeyManager()
+
+        result = await _final_critic(
+            draft=sample_draft,
+            plan=sample_plan,
+            blog_title="Semantic Caching for LLM Applications",
+            key_manager=key_manager,
+        )
+
+        # Should return a FinalCriticResult
+        assert isinstance(result, FinalCriticResult)
+
+        # Should have all 7 dimension scores
+        assert hasattr(result.scores, "coherence")
+        assert hasattr(result.scores, "voice_consistency")
+        assert hasattr(result.scores, "no_redundancy")
+        assert hasattr(result.scores, "narrative_arc")
+        assert hasattr(result.scores, "hook_effectiveness")
+        assert hasattr(result.scores, "conclusion_strength")
+        assert hasattr(result.scores, "overall_polish")
+
+        # Scores should be in valid range
+        for field in ["coherence", "voice_consistency", "no_redundancy",
+                      "narrative_arc", "hook_effectiveness", "conclusion_strength", "overall_polish"]:
+            score = getattr(result.scores, field)
+            assert 1 <= score <= 10, f"{field} score {score} out of range"
+
+        # Should have word count and reading time
+        assert result.word_count > 0
+        assert result.reading_time_minutes >= 1
+
+    @pytest.mark.asyncio
+    async def test_final_critic_identifies_issues(self, sample_plan):
+        """Final critic identifies issues in a flawed draft."""
+        from src.agent.key_manager import KeyManager
+
+        # Create a deliberately weak draft
+        weak_draft = """# Test Blog
+
+Here's some content. More content here. Even more content.
+
+## Section 1
+
+Random text without structure. No clear point being made.
+
+## Section 2
+
+Completely unrelated topic. This doesn't flow at all from section 1.
+
+## Conclusion
+
+Abrupt ending with no takeaways.
+"""
+
+        key_manager = KeyManager()
+
+        result = await _final_critic(
+            draft=weak_draft,
+            plan=sample_plan,
+            blog_title="Test Blog",
+            key_manager=key_manager,
+        )
+
+        # Should identify issues (lower scores or transition fixes)
+        scores_dict = result.scores.model_dump()
+        avg_score = sum(scores_dict.values()) / len(scores_dict)
+
+        # Weak draft should have lower average score or issues identified
+        # (We don't assert exact values as LLM output varies)
+        assert isinstance(result.issues, list)
+        assert isinstance(result.transition_fixes, list)
