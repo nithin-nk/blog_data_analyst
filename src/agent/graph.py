@@ -6,14 +6,14 @@ This module defines the blog agent graph with:
 - build_blog_agent_graph() to create the compiled graph
 
 Graph structure:
-    topic_discovery → planning → research → validate_sources → write_section
-                                                                  ↓ (loop)
-                                                              final_assembly → END
+    topic_discovery → content_landscape_analysis → planning → research →
+    validate_sources → write_section ↓ (loop) → final_assembly → END
 """
 
 from langgraph.graph import END, StateGraph
 
 from .nodes import (
+    content_landscape_analysis_node,
     final_assembly_node,
     planning_node,
     research_node,
@@ -48,9 +48,8 @@ def build_blog_agent_graph() -> StateGraph:
     Build the blog agent graph with section loop.
 
     Graph structure:
-        topic_discovery → planning → research → validate_sources → write_section
-                                                                      ↓ (loop)
-                                                                  final_assembly → END
+        topic_discovery → content_landscape_analysis → planning → research →
+        validate_sources → write_section ↓ (loop) → final_assembly → END
 
     Returns:
         Compiled LangGraph StateGraph
@@ -60,6 +59,7 @@ def build_blog_agent_graph() -> StateGraph:
 
     # Add all nodes
     graph.add_node("topic_discovery", topic_discovery_node)
+    graph.add_node("content_landscape_analysis", content_landscape_analysis_node)
     graph.add_node("planning", planning_node)
     graph.add_node("research", research_node)
     graph.add_node("validate_sources", validate_sources_node)
@@ -70,7 +70,8 @@ def build_blog_agent_graph() -> StateGraph:
     graph.set_entry_point("topic_discovery")
 
     # Linear edges for pipeline
-    graph.add_edge("topic_discovery", "planning")
+    graph.add_edge("topic_discovery", "content_landscape_analysis")
+    graph.add_edge("content_landscape_analysis", "planning")
     graph.add_edge("planning", "research")
     graph.add_edge("research", "validate_sources")
     graph.add_edge("validate_sources", "write_section")

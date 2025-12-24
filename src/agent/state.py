@@ -33,6 +33,7 @@ class Phase(str, Enum):
     """
 
     TOPIC_DISCOVERY = "topic_discovery"
+    CONTENT_LANDSCAPE = "content_landscape"
     PLANNING = "planning"
     RESEARCHING = "researching"
     VALIDATING_SOURCES = "validating_sources"
@@ -71,6 +72,9 @@ class BlogAgentState(TypedDict, total=False):
     # === Phase 0.5: Topic Discovery ===
     discovery_queries: list[str]
     topic_context: list[dict[str, str]]  # [{title, url, snippet}]
+
+    # === Phase 0.6: Content Landscape Analysis ===
+    content_strategy: dict[str, Any] | None  # ContentStrategy as dict
 
     # === Phase 1: Planning ===
     plan: dict[str, Any]  # BlogPlan as dict
@@ -212,6 +216,62 @@ class AlternativeQueries(BaseModel):
         min_length=2,
         max_length=3,
         description="2-3 alternative search queries different from the originals",
+    )
+
+
+# =============================================================================
+# Content Landscape Analysis Models (Slice 0.4)
+# =============================================================================
+
+
+class ContentGap(BaseModel):
+    """Identified gap in existing content."""
+
+    gap_type: str = Field(
+        description="Type of gap: missing_topic | insufficient_depth | no_examples | missing_edge_cases"
+    )
+    description: str = Field(description="What's missing in existing articles")
+    opportunity: str = Field(description="How we'll fill this gap uniquely")
+
+
+class ExistingArticleSummary(BaseModel):
+    """Summary of one analyzed article."""
+
+    url: str = Field(description="Article URL")
+    title: str = Field(description="Article title")
+    main_angle: str = Field(description="What angle does this article take?")
+    strengths: list[str] = Field(description="What it does well (2-3 points)")
+    weaknesses: list[str] = Field(description="What's missing or weak (2-3 points)")
+    key_points_covered: list[str] = Field(description="Main points covered (3-5 bullets)")
+
+
+class ContentStrategy(BaseModel):
+    """Strategy for differentiated blog content."""
+
+    unique_angle: str = Field(
+        description="Our differentiated perspective (e.g., 'focus on production pitfalls', 'emphasize cost optimization')"
+    )
+    target_persona: str = Field(
+        description="Primary reader type: junior_engineer | senior_architect | data_scientist | devops_engineer"
+    )
+    reader_problem: str = Field(
+        description="Specific problem they're solving (e.g., 'reduce LLM API costs by 50%')"
+    )
+    gaps_to_fill: list[ContentGap] = Field(
+        min_length=1,
+        max_length=5,
+        description="Top 3-5 content gaps we'll address",
+    )
+    existing_content_summary: str = Field(
+        description="1-2 sentence summary of what top articles already cover well"
+    )
+    analyzed_articles: list[ExistingArticleSummary] = Field(
+        min_length=3,
+        max_length=10,
+        description="5-10 top articles analyzed",
+    )
+    differentiation_requirements: list[str] = Field(
+        description="Specific requirements to ensure uniqueness (e.g., 'must include benchmarks')"
     )
 
 

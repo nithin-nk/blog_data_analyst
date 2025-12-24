@@ -31,7 +31,9 @@ from .state import (
     AlternativeQueries,
     BlogAgentState,
     BlogPlan,
+    ContentStrategy,
     DiscoveryQueries,
+    ExistingArticleSummary,
     JobManager,
     Phase,
     SectionCriticResult,
@@ -302,6 +304,459 @@ async def _execute_searches(
 
 
 # =============================================================================
+# Content Landscape Analysis Node (Phase 0.6)
+# =============================================================================
+
+
+def _select_top_urls(topic_context: list[dict], max_count: int = 10) -> list[dict]:
+    """
+    Select top N URLs from topic context for content analysis.
+
+    Args:
+        topic_context: List of {title, url, snippet} from topic discovery
+        max_count: Maximum URLs to select
+
+    Returns:
+        Top N URL entries (already deduplicated by topic_discovery)
+    """
+    return topic_context[:max_count]
+
+
+def _format_article_summaries(articles: list[ExistingArticleSummary]) -> str:
+    """
+    Format analyzed articles for the strategy synthesis prompt.
+
+    Args:
+        articles: List of ExistingArticleSummary models
+
+    Returns:
+        Formatted string with article summaries
+    """
+    formatted = []
+    for i, article in enumerate(articles, 1):
+        strengths = ", ".join(article.strengths) if article.strengths else "None identified"
+        weaknesses = ", ".join(article.weaknesses) if article.weaknesses else "None identified"
+        key_points = ", ".join(article.key_points_covered) if article.key_points_covered else "None"
+
+        formatted.append(f"""
+Article {i}: {article.title}
+URL: {article.url}
+Angle: {article.main_angle}
+Strengths: {strengths}
+Weaknesses: {weaknesses}
+Covers: {key_points}
+""")
+    return "\n".join(formatted)
+
+
+async def _analyze_single_article(
+    article: dict,
+    blog_title: str,
+    key_manager: KeyManager,
+    max_retries: int = 3,
+) -> ExistingArticleSummary | None:
+    """
+    Analyze a single article using LLM.
+
+    Args:
+        article: Dict with url, title, content
+        blog_title: Blog topic being researched
+        key_manager: API key manager
+        max_retries: Maximum retry attempts
+
+    Returns:
+        ExistingArticleSummary model or None on failure
+    """
+    url = article.get("url", "")
+    title = article.get("title", "Untitled")
+    content = article.get("content", "")[:8000]  # Limit to 8k chars
+
+    prompt = f"""Analyze this article on "{blog_title}":
+
+URL: {url}
+Title: {title}
+Content (first 8k chars):
+{content}
+
+Extract:
+1. main_angle: What unique perspective does this article take?
+2. strengths: What does it do well? (2-3 points)
+3. weaknesses: What's missing or weak? (2-3 points)
+4. key_points_covered: Main topics/sections covered (3-5 bullet points)
+
+Output as ExistingArticleSummary model."""
+
+    last_error = None
+
+    for attempt in range(max_retries):
+        api_key = key_manager.get_best_key()
+
+        try:
+            llm = ChatGoogleGenerativeAI(
+                model=LLM_MODEL_LITE,
+                google_api_key=api_key,
+                temperature=LLM_TEMPERATURE_LOW,
+            )
+
+            structured_llm = llm.with_structured_output(ExistingArticleSummary)
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, lambda: structured_llm.invoke(prompt)
+            )
+
+            key_manager.record_usage(
+                api_key,
+                tokens_in=len(prompt) // 4,
+                tokens_out=200,
+            )
+
+            return result
+
+        except Exception as e:
+            error_str = str(e).lower()
+            last_error = e
+
+            if "429" in str(e) or "quota" in error_str or "resource" in error_str:
+                logger.warning("Rate limited on key, rotating...")
+                key_manager.mark_rate_limited(api_key)
+
+                next_key = key_manager.get_next_key(api_key)
+                if next_key is None:
+                    logger.error("All API keys exhausted during article analysis")
+                    return None
+                continue
+
+            logger.error(f"Article analysis attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2**attempt)
+
+    logger.error(f"Failed to analyze article after {max_retries} attempts: {last_error}")
+    return None
+
+
+async def _analyze_article_with_semaphore(
+    semaphore: asyncio.Semaphore,
+    article: dict,
+    blog_title: str,
+    key_manager: KeyManager,
+) -> ExistingArticleSummary | None:
+    """
+    Analyze single article with concurrency limit.
+
+    Args:
+        semaphore: Asyncio semaphore for concurrency control
+        article: Article dict to analyze
+        blog_title: Blog topic
+        key_manager: API key manager
+
+    Returns:
+        ExistingArticleSummary or None
+    """
+    async with semaphore:
+        return await _analyze_single_article(article, blog_title, key_manager)
+
+
+async def _synthesize_content_strategy(
+    blog_title: str,
+    context: str,
+    analyzed_articles: list[ExistingArticleSummary],
+    key_manager: KeyManager,
+    max_retries: int = 3,
+) -> ContentStrategy:
+    """
+    Synthesize content strategy from analyzed articles.
+
+    Args:
+        blog_title: Blog topic
+        context: User-provided context
+        analyzed_articles: List of analyzed article summaries
+        key_manager: API key manager
+        max_retries: Maximum retry attempts
+
+    Returns:
+        ContentStrategy model
+
+    Raises:
+        RuntimeError: If synthesis fails after all retries
+    """
+    formatted_summaries = _format_article_summaries(analyzed_articles)
+
+    prompt = f"""You are analyzing the content landscape for a blog on: "{blog_title}"
+
+Context provided by user:
+{context}
+
+I've analyzed {len(analyzed_articles)} top articles on this topic.
+Here's what they cover:
+
+{formatted_summaries}
+
+Your task: Create a ContentStrategy that ensures our blog is UNIQUE and VALUABLE.
+
+Requirements:
+1. Identify 3-5 content gaps (what's missing, shallow, or wrong in existing articles)
+2. Choose a unique_angle that fills these gaps (e.g., "focus on production pitfalls others ignore", "provide concrete benchmarks", "compare 3 real implementations")
+3. Select target_persona (who needs this most: junior_engineer, senior_architect, data_scientist, devops_engineer)
+4. Define reader_problem (specific problem they're solving)
+5. List differentiation_requirements (specific things our blog MUST include to stand out)
+
+Examples of good unique angles:
+- "Production-focused guide covering error handling, monitoring, and scaling (others focus only on basics)"
+- "Benchmark-driven comparison of 3 caching strategies with real numbers (others are purely theoretical)"
+- "Cost optimization angle: how to reduce LLM API bills by 60% (others don't mention costs)"
+- "Edge cases and limitations deep-dive (others only show happy path)"
+
+Output as ContentStrategy model."""
+
+    last_error = None
+
+    for attempt in range(max_retries):
+        api_key = key_manager.get_best_key()
+
+        try:
+            llm = ChatGoogleGenerativeAI(
+                model=LLM_MODEL_LITE,
+                google_api_key=api_key,
+                temperature=LLM_TEMPERATURE_MEDIUM,
+            )
+
+            structured_llm = llm.with_structured_output(ContentStrategy)
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, lambda: structured_llm.invoke(prompt)
+            )
+
+            key_manager.record_usage(
+                api_key,
+                tokens_in=len(prompt) // 4,
+                tokens_out=500,
+            )
+
+            return result
+
+        except Exception as e:
+            error_str = str(e).lower()
+            last_error = e
+
+            if "429" in str(e) or "quota" in error_str or "resource" in error_str:
+                logger.warning("Rate limited on key, rotating...")
+                key_manager.mark_rate_limited(api_key)
+
+                next_key = key_manager.get_next_key(api_key)
+                if next_key is None:
+                    raise RuntimeError("All API keys exhausted or rate-limited")
+                continue
+
+            logger.error(f"Strategy synthesis attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2**attempt)
+
+    raise RuntimeError(f"Failed to synthesize content strategy after {max_retries} attempts: {last_error}")
+
+
+async def content_landscape_analysis_node(state: BlogAgentState) -> dict[str, Any]:
+    """
+    Phase 0.6: Content Landscape Analysis Node.
+
+    Analyzes top existing articles to identify content gaps and determine
+    a unique angle for differentiation BEFORE planning.
+
+    Process:
+    1. Select top 10 URLs from topic_context
+    2. Fetch full content for each (via fetch_url_content) - skip on failure
+    3. LLM analyzes each article → ExistingArticleSummary (3 concurrent via semaphore)
+    4. LLM synthesizes all → ContentStrategy
+    5. Save to content_strategy.json
+
+    Args:
+        state: Current BlogAgentState containing:
+            - title: Blog title (required)
+            - context: User context (required)
+            - topic_context: List of {title, url, snippet} from discovery
+            - job_id: Job identifier for checkpointing
+
+    Returns:
+        State update dict with:
+        - content_strategy: ContentStrategy as dict
+        - current_phase: Updated to PLANNING
+    """
+    logger.info(f"Starting content landscape analysis for: {state.get('title')}")
+
+    title = state.get("title", "")
+    context = state.get("context", "")
+    topic_context = state.get("topic_context", [])
+    job_id = state.get("job_id", "")
+
+    if not title:
+        return {
+            "current_phase": Phase.FAILED.value,
+            "error_message": "Title is required for content landscape analysis",
+        }
+
+    if not topic_context:
+        logger.warning("No topic context available, skipping content landscape analysis")
+        return {
+            "content_strategy": None,
+            "current_phase": Phase.PLANNING.value,
+        }
+
+    try:
+        key_manager = KeyManager.from_env()
+
+        # Step 1: Select top 10 URLs
+        top_urls = _select_top_urls(topic_context, max_count=10)
+        logger.info(f"Selected {len(top_urls)} URLs for content analysis")
+
+        # Step 2: Fetch full content for each URL
+        articles_content = []
+        for url_data in top_urls:
+            url = url_data.get("url", "")
+            if not url:
+                continue
+
+            try:
+                result = await fetch_url_content(url)
+                if result.get("success") and result.get("content"):
+                    articles_content.append({
+                        "url": url,
+                        "title": url_data.get("title", result.get("title", "Untitled")),
+                        "content": result["content"],
+                    })
+                    logger.info(f"Fetched content from: {url}")
+                else:
+                    logger.warning(f"Failed to fetch content from {url}: {result.get('error')}")
+            except Exception as e:
+                logger.warning(f"Error fetching {url}: {e}")
+                continue
+
+        logger.info(f"Successfully fetched {len(articles_content)} articles")
+
+        if len(articles_content) < 3:
+            logger.warning(f"Only {len(articles_content)} articles fetched, proceeding with limited analysis")
+
+        # Step 3: Analyze each article with LLM (3 concurrent)
+        semaphore = asyncio.Semaphore(3)
+        tasks = [
+            _analyze_article_with_semaphore(semaphore, article, title, key_manager)
+            for article in articles_content
+        ]
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Filter out exceptions and None results
+        analyzed_articles = []
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning(f"Article analysis failed with exception: {result}")
+            elif result is not None:
+                analyzed_articles.append(result)
+
+        logger.info(f"Successfully analyzed {len(analyzed_articles)} articles")
+
+        if len(analyzed_articles) < 3:
+            logger.warning("Insufficient articles analyzed, creating minimal strategy")
+            # Create a minimal content strategy as dict (bypassing validation)
+            # Since we don't have enough articles, we return a simplified strategy
+            strategy_dict = {
+                "unique_angle": "Focus on practical implementation with concrete examples",
+                "target_persona": "senior_engineer",
+                "reader_problem": f"Understanding and implementing {title}",
+                "gaps_to_fill": [
+                    {
+                        "gap_type": "insufficient_depth",
+                        "description": "Limited content available for comprehensive analysis",
+                        "opportunity": "Provide thorough coverage of the topic",
+                    }
+                ],
+                "existing_content_summary": "Limited existing content available for analysis",
+                "analyzed_articles": [a.model_dump() for a in analyzed_articles],
+                "differentiation_requirements": [
+                    "Include working code examples",
+                    "Provide concrete benchmarks where applicable",
+                ],
+            }
+
+            # Step 5: Save checkpoint
+            if job_id:
+                job_manager = JobManager()
+                job_dir = job_manager.get_job_dir(job_id)
+
+                # Save content_strategy.json
+                import json
+                strategy_path = job_dir / "content_strategy.json"
+                with open(strategy_path, "w") as f:
+                    json.dump(strategy_dict, f, indent=2)
+                logger.info(f"Saved minimal content strategy to {strategy_path}")
+
+                job_manager.save_state(
+                    job_id,
+                    {
+                        "current_phase": Phase.PLANNING.value,
+                        "content_strategy": strategy_dict,
+                    },
+                )
+
+            return {
+                "content_strategy": strategy_dict,
+                "current_phase": Phase.PLANNING.value,
+            }
+        else:
+            # Step 4: Synthesize content strategy
+            content_strategy = await _synthesize_content_strategy(
+                blog_title=title,
+                context=context,
+                analyzed_articles=analyzed_articles,
+                key_manager=key_manager,
+            )
+
+        logger.info(f"Content strategy: unique_angle='{content_strategy.unique_angle}'")
+        logger.info(f"Gaps to fill: {len(content_strategy.gaps_to_fill)}")
+
+        # Convert to dict for state storage
+        strategy_dict = content_strategy.model_dump()
+
+        # Step 5: Save checkpoint
+        if job_id:
+            job_manager = JobManager()
+            job_dir = job_manager.get_job_dir(job_id)
+
+            # Save content_strategy.json
+            import json
+            strategy_path = job_dir / "content_strategy.json"
+            with open(strategy_path, "w") as f:
+                json.dump(strategy_dict, f, indent=2)
+            logger.info(f"Saved content strategy to {strategy_path}")
+
+            job_manager.save_state(
+                job_id,
+                {
+                    "current_phase": Phase.PLANNING.value,
+                    "content_strategy": strategy_dict,
+                },
+            )
+
+        return {
+            "content_strategy": strategy_dict,
+            "current_phase": Phase.PLANNING.value,
+        }
+
+    except RuntimeError as e:
+        logger.error(f"Content landscape analysis failed: {e}")
+        return {
+            "current_phase": Phase.FAILED.value,
+            "error_message": str(e),
+        }
+    except Exception as e:
+        logger.error(f"Unexpected error in content landscape analysis: {e}")
+        return {
+            "current_phase": Phase.FAILED.value,
+            "error_message": f"Unexpected error: {e}",
+        }
+
+
+# =============================================================================
 # Planning Node (Phase 1)
 # =============================================================================
 
@@ -333,8 +788,33 @@ def _format_topic_context_snippets(
     return "\n\n".join(snippets)
 
 
+def _format_content_gaps(gaps: list[dict]) -> str:
+    """Format content gaps for planning prompt."""
+    if not gaps:
+        return "No specific gaps identified."
+
+    formatted = []
+    for i, gap in enumerate(gaps, 1):
+        gap_type = gap.get("gap_type", "unknown")
+        description = gap.get("description", "")
+        opportunity = gap.get("opportunity", "")
+        formatted.append(f"{i}. [{gap_type}] {description}\n   → Opportunity: {opportunity}")
+    return "\n".join(formatted)
+
+
+def _format_differentiation_requirements(requirements: list[str]) -> str:
+    """Format differentiation requirements for planning prompt."""
+    if not requirements:
+        return "No specific requirements."
+    return "\n".join(f"- {req}" for req in requirements)
+
+
 def _build_planning_prompt(
-    title: str, context: str, target_words: int, topic_snippets: str
+    title: str,
+    context: str,
+    target_words: int,
+    topic_snippets: str,
+    content_strategy: dict | None = None,
 ) -> str:
     """
     Build the planning prompt for Gemini.
@@ -344,10 +824,44 @@ def _build_planning_prompt(
         context: User-provided context
         target_words: Total target word count
         topic_snippets: Formatted topic context snippets
+        content_strategy: ContentStrategy dict from landscape analysis (optional)
 
     Returns:
         Complete prompt string
     """
+    # Build content strategy section if available
+    strategy_section = ""
+    if content_strategy:
+        unique_angle = content_strategy.get("unique_angle", "N/A")
+        target_persona = content_strategy.get("target_persona", "experienced engineer")
+        reader_problem = content_strategy.get("reader_problem", "N/A")
+        gaps = content_strategy.get("gaps_to_fill", [])
+        requirements = content_strategy.get("differentiation_requirements", [])
+        existing_summary = content_strategy.get("existing_content_summary", "N/A")
+
+        strategy_section = f"""
+## CONTENT STRATEGY (from landscape analysis)
+**Unique Angle**: {unique_angle}
+**Target Reader**: {target_persona}
+**Reader Problem**: {reader_problem}
+
+**What top articles already cover**:
+{existing_summary}
+
+**Content Gaps to Fill**:
+{_format_content_gaps(gaps)}
+
+**Differentiation Requirements** (MUST include these):
+{_format_differentiation_requirements(requirements)}
+
+**IMPORTANT**: Your plan must:
+1. Take the unique angle identified above
+2. Fill the content gaps others missed
+3. Meet ALL differentiation requirements
+4. Serve the target reader's specific problem
+5. Do NOT just rehash what existing articles already cover well
+"""
+
     return f"""You are planning a technical blog post.
 
 Blog structure must follow:
@@ -376,7 +890,7 @@ For each section, provide:
 ## Blog Topic
 Title: "{title}"
 Context: {context}
-
+{strategy_section}
 ## Topic Research (from web search)
 The following snippets provide current context about this topic:
 {topic_snippets}
@@ -395,6 +909,7 @@ async def _generate_blog_plan(
     target_words: int,
     topic_context: list[dict[str, str]],
     key_manager: KeyManager,
+    content_strategy: dict | None = None,
     max_retries: int = 3,
 ) -> BlogPlan:
     """
@@ -406,6 +921,7 @@ async def _generate_blog_plan(
         target_words: Total target word count
         topic_context: List of {title, url, snippet} from discovery
         key_manager: KeyManager for API key rotation
+        content_strategy: ContentStrategy dict from landscape analysis (optional)
         max_retries: Maximum retry attempts
 
     Returns:
@@ -417,8 +933,10 @@ async def _generate_blog_plan(
     # Format topic snippets
     topic_snippets = _format_topic_context_snippets(topic_context)
 
-    # Build prompt
-    prompt = _build_planning_prompt(title, context, target_words, topic_snippets)
+    # Build prompt with content strategy
+    prompt = _build_planning_prompt(
+        title, context, target_words, topic_snippets, content_strategy
+    )
 
     last_error = None
 
@@ -480,7 +998,8 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
     Phase 1: Planning Node.
 
     Generates a structured blog plan with sections from title, context,
-    target length, and topic context (from discovery phase).
+    target length, topic context (from discovery phase), and content strategy
+    (from landscape analysis phase).
 
     Args:
         state: Current BlogAgentState containing:
@@ -488,6 +1007,7 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
             - context: User context (required)
             - target_length: "short" | "medium" | "long" (default "medium")
             - topic_context: List of {title, url, snippet} from discovery
+            - content_strategy: ContentStrategy dict from landscape analysis (optional)
             - job_id: Job identifier for checkpointing
 
     Returns:
@@ -501,7 +1021,14 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
     context = state.get("context", "")
     target_length = state.get("target_length", "medium")
     topic_context = state.get("topic_context", [])
+    content_strategy = state.get("content_strategy")
     job_id = state.get("job_id", "")
+
+    # Log content strategy if available
+    if content_strategy:
+        logger.info(f"Using content strategy: unique_angle='{content_strategy.get('unique_angle')}'")
+    else:
+        logger.info("No content strategy available, planning without differentiation context")
 
     # Validate required inputs
     if not title:
@@ -517,13 +1044,14 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
         # Initialize key manager from environment
         key_manager = KeyManager.from_env()
 
-        # Generate blog plan using LLM
+        # Generate blog plan using LLM with content strategy
         plan = await _generate_blog_plan(
             title=title,
             context=context,
             target_words=target_words,
             topic_context=topic_context,
             key_manager=key_manager,
+            content_strategy=content_strategy,
         )
 
         # Convert to dict for state storage

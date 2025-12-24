@@ -33,6 +33,7 @@ class TestPhaseEnum:
         """All expected phases exist."""
         expected = [
             "topic_discovery",
+            "content_landscape",
             "planning",
             "researching",
             "validating_sources",

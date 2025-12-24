@@ -12,7 +12,7 @@
 
 | Round | Slices | Goal | Status |
 |-------|--------|------|--------|
-| Foundation | 0.1-0.4 | Tools, State, Discovery, Content Analysis | ✓ DONE (0.4 ○ PENDING) |
+| Foundation | 0.1-0.4 | Tools, State, Discovery, Content Analysis | ✓ DONE |
 | Pre-Foundation | Phases 4-5 | Planning, Research, Validation | ✓ DONE |
 | Round 1 | 6.1-6.4 | Minimal End-to-End CLI | ✓ DONE |
 | Round 2 | 6.5-6.8 | Quality Layer (15D Critic + Differentiation + Refine) | ○ PENDING |
@@ -389,7 +389,7 @@ async def topic_discovery_node(state: BlogAgentState) -> dict[str, Any]:
 
 ### Slice 0.4: Content Landscape Analysis (NEW - Pre-Planning Phase)
 
-**Status**: ○ PENDING
+**Status**: ✓ COMPLETE
 
 **Goal**: Analyze top 10 existing articles on the topic to identify content gaps and determine a unique angle BEFORE planning the blog structure.
 
@@ -1746,7 +1746,7 @@ def _generate_fact_check_md(verifications: list, job_dir: Path):
 | 0.1 | Tools & Utilities | test_tools.py | test_tools_integration.py | ✓ |
 | 0.2 | State & Checkpoints | test_checkpoints.py, test_state.py | - | ✓ |
 | 0.3 | Topic Discovery (Phase 0.5) | test_topic_discovery.py | test_topic_discovery_integration.py | ✓ |
-| **0.4** | **Content Landscape Analysis (NEW)** | **test_content_landscape.py** | **test_content_landscape_integration.py** | **○** |
+| **0.4** | **Content Landscape Analysis (NEW)** | **test_content_landscape.py** | **test_content_landscape_integration.py** | **✓** |
 | **Pre-Foundation** | **Planning & Research (Phases 4-5)** | | | |
 | - | Planning Node (enhanced with ContentStrategy) | test_planning.py | test_planning_integration.py | ✓ |
 | - | Research + Validation Nodes | test_research.py, test_validation.py | test_research_integration.py | ✓ |
