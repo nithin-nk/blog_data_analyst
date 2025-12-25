@@ -319,3 +319,118 @@ class TestResetRateLimits:
         # All should be usable
         for key in manager.keys:
             assert manager.usage[key].rate_limited is False
+
+
+class TestPaidKeyFallback:
+    """Tests for GOOGLE_PAID_KEY fallback."""
+
+    def test_from_env_loads_paid_key(self, temp_usage_dir: Path):
+        """KeyManager.from_env() loads GOOGLE_PAID_KEY if present."""
+        env_copy = {k: v for k, v in os.environ.items()
+                   if not k.startswith("GOOGLE_")}
+        env_copy["GOOGLE_API_KEY_1"] = "free_key_1"
+        env_copy["GOOGLE_PAID_KEY"] = "paid_key"
+        with patch.dict(os.environ, env_copy, clear=True):
+            manager = KeyManager.from_env()
+            manager._usage_dir = temp_usage_dir
+            assert manager.paid_key == "paid_key"
+
+    def test_from_env_no_paid_key(self, temp_usage_dir: Path):
+        """KeyManager.from_env() sets paid_key to None if not present."""
+        env_copy = {k: v for k, v in os.environ.items()
+                   if not k.startswith("GOOGLE_")}
+        env_copy["GOOGLE_API_KEY_1"] = "free_key_1"
+        with patch.dict(os.environ, env_copy, clear=True):
+            manager = KeyManager.from_env()
+            manager._usage_dir = temp_usage_dir
+            assert manager.paid_key is None
+
+    def test_get_best_key_falls_back_to_paid_key(
+        self,
+        sample_keys: list[str],
+        temp_usage_dir: Path
+    ):
+        """get_best_key returns paid_key when all free keys exhausted."""
+        manager = KeyManager(keys=sample_keys, paid_key="paid_key")
+        manager._usage_dir = temp_usage_dir
+        manager._load_usage()
+
+        # Rate limit all free keys
+        for key in manager.keys:
+            manager.mark_rate_limited(key)
+
+        # Should return paid key instead of raising
+        best = manager.get_best_key()
+        assert best == "paid_key"
+
+    def test_get_best_key_prefers_free_keys(
+        self,
+        sample_keys: list[str],
+        temp_usage_dir: Path
+    ):
+        """get_best_key uses free keys before paid key."""
+        manager = KeyManager(keys=sample_keys, paid_key="paid_key")
+        manager._usage_dir = temp_usage_dir
+        manager._load_usage()
+
+        # Don't rate limit any keys
+        best = manager.get_best_key()
+        assert best in sample_keys
+        assert best != "paid_key"
+
+    def test_get_best_key_raises_when_no_paid_key(
+        self,
+        sample_keys: list[str],
+        temp_usage_dir: Path
+    ):
+        """get_best_key raises if no paid_key and all free keys exhausted."""
+        manager = KeyManager(keys=sample_keys, paid_key=None)
+        manager._usage_dir = temp_usage_dir
+        manager._load_usage()
+
+        # Rate limit all free keys
+        for key in manager.keys:
+            manager.mark_rate_limited(key)
+
+        with pytest.raises(RuntimeError, match="All API keys exhausted"):
+            manager.get_best_key()
+
+    def test_get_next_key_falls_back_to_paid_key(
+        self,
+        sample_keys: list[str],
+        temp_usage_dir: Path
+    ):
+        """get_next_key returns paid_key when all free keys exhausted."""
+        manager = KeyManager(keys=sample_keys, paid_key="paid_key")
+        manager._usage_dir = temp_usage_dir
+        manager._load_usage()
+
+        # Rate limit all but last key
+        for key in sample_keys[:-1]:
+            manager.mark_rate_limited(key)
+
+        # Get next for last key should return paid key
+        last_key = sample_keys[-1]
+        next_key = manager.get_next_key(last_key)
+
+        assert next_key == "paid_key"
+
+    def test_get_next_key_returns_none_when_no_paid_key(
+        self,
+        sample_keys: list[str],
+        temp_usage_dir: Path
+    ):
+        """get_next_key returns None if no paid_key and all exhausted."""
+        manager = KeyManager(keys=sample_keys, paid_key=None)
+        manager._usage_dir = temp_usage_dir
+        manager._load_usage()
+
+        # Rate limit all but last key
+        for key in sample_keys[:-1]:
+            manager.mark_rate_limited(key)
+
+        # Get next for last key should return None
+        last_key = sample_keys[-1]
+        next_key = manager.get_next_key(last_key)
+
+        assert next_key is None

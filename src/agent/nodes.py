@@ -2122,7 +2122,7 @@ async def _critic_section(
     llm = ChatGoogleGenerativeAI(
         model=LLM_MODEL_LITE,
         temperature=LLM_TEMPERATURE_LOW,
-        google_api_key=key_manager.get_current_key(),
+        google_api_key=key_manager.get_best_key(),
     )
 
     # Structured output for SectionCriticResult
@@ -2134,9 +2134,6 @@ async def _critic_section(
         None,
         lambda: llm_structured.invoke(prompt),
     )
-
-    # Record API usage
-    key_manager.record_usage(success=True)
 
     # Calculate average score
     scores_dict = result.scores.model_dump()
@@ -2305,7 +2302,7 @@ async def _refine_section(
     llm = ChatGoogleGenerativeAI(
         model=LLM_MODEL_FULL,
         temperature=LLM_TEMPERATURE_LOW,
-        google_api_key=key_manager.get_current_key(),
+        google_api_key=key_manager.get_best_key(),
     )
 
     # Run async LLM call
@@ -2314,9 +2311,6 @@ async def _refine_section(
         None,
         lambda: llm.invoke(prompt).content,
     )
-
-    # Record API usage
-    key_manager.record_usage(success=True)
 
     logger.info(
         f"Refined section {section.get('id')}: "
@@ -2794,7 +2788,7 @@ async def _final_critic(
             llm = ChatGoogleGenerativeAI(
                 model=LLM_MODEL_FULL,
                 temperature=LLM_TEMPERATURE_LOW,
-                google_api_key=key_manager.get_current_key(),
+                google_api_key=key_manager.get_best_key(),
             )
 
             llm_structured = llm.with_structured_output(FinalCriticResult)
@@ -2805,8 +2799,6 @@ async def _final_critic(
                 None,
                 lambda: llm_structured.invoke(prompt),
             )
-
-            key_manager.record_usage(success=True)
 
             # Calculate average score
             scores_dict = result.scores.model_dump()
@@ -2822,8 +2814,6 @@ async def _final_critic(
 
         except Exception as e:
             logger.warning(f"Final critic attempt {attempt + 1} failed: {e}")
-            key_manager.record_usage(success=False)
-            key_manager.rotate_key()
             if attempt == max_retries - 1:
                 # Return a passing result on complete failure to not block pipeline
                 logger.error("Final critic failed, returning default pass result")
@@ -2929,7 +2919,7 @@ async def _apply_transition_fixes(
             llm = ChatGoogleGenerativeAI(
                 model=LLM_MODEL_FULL,
                 temperature=LLM_TEMPERATURE_MEDIUM,
-                google_api_key=key_manager.get_current_key(),
+                google_api_key=key_manager.get_best_key(),
             )
 
             # Run async LLM call
@@ -2938,8 +2928,6 @@ async def _apply_transition_fixes(
                 None,
                 lambda: llm.invoke(prompt),
             )
-
-            key_manager.record_usage(success=True)
 
             # Extract content from response
             refined_draft = result.content.strip()
@@ -2957,8 +2945,6 @@ async def _apply_transition_fixes(
 
         except Exception as e:
             logger.warning(f"Transition fix attempt {attempt + 1} failed: {e}")
-            key_manager.record_usage(success=False)
-            key_manager.rotate_key()
             if attempt == max_retries - 1:
                 # Return original draft on failure
                 logger.error("Transition fixes failed, keeping original draft")
@@ -3190,4 +3176,49 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": f"Final assembly failed: {e}",
+        }
+
+
+# =============================================================================
+# Human Review Node (Phase 5)
+# =============================================================================
+
+
+async def human_review_node(state: BlogAgentState) -> dict[str, Any]:
+    """
+    Simple human review with Rich prompt.
+
+    Displays completion message and asks user to approve or quit.
+    """
+    from rich.console import Console
+    from rich.prompt import Confirm
+
+    console = Console()
+    job_id = state.get("job_id", "")
+    final_review = state.get("final_review", {})
+
+    # Display completion summary
+    console.print(f"\n[bold green]✓ Blog Complete[/bold green]")
+    console.print(f"Job: {job_id}")
+    console.print(f"Output: ~/.blog_agent/jobs/{job_id}/final.md\n")
+
+    # Show critic scores if available
+    if final_review and "scores" in final_review:
+        scores = final_review["scores"]
+        console.print("[bold]Final Critic Scores:[/bold]")
+        for dim, score in scores.items():
+            console.print(f"  {dim}: {score}/10")
+        console.print()
+
+    # Prompt for approval
+    approved = Confirm.ask("Approve and finalize?", default=True)
+
+    if approved:
+        return {
+            "human_review_decision": "approve",
+            "current_phase": Phase.DONE.value,
+        }
+    else:
+        return {
+            "human_review_decision": "quit",
         }

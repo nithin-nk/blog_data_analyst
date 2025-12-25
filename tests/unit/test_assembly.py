@@ -608,7 +608,6 @@ class TestFinalCriticFunction:
 
         assert isinstance(result, FinalCriticResult)
         assert result.overall_pass is True
-        mock_key_manager.record_usage.assert_called_with(success=True)
 
     @pytest.mark.asyncio
     async def test_final_critic_handles_failure(self, mock_key_manager):
@@ -686,7 +685,6 @@ class TestApplyTransitionFixes:
             )
 
         assert "Improved content" in result
-        mock_key_manager.record_usage.assert_called_with(success=True)
 
     @pytest.mark.asyncio
     async def test_handles_failure_returns_original(self, mock_key_manager):

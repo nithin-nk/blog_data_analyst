@@ -6,14 +6,18 @@ Features:
 - Rotates to next key on 429 error
 - Selects key with most remaining quota
 - Persists usage to ~/.blog_agent/usage/{date}.json
+- Falls back to GOOGLE_PAID_KEY when all free keys exhausted
 """
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, date
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 # Default RPD (requests per day) limit per key
@@ -57,10 +61,12 @@ class KeyManager:
     """
 
     keys: list[str]
+    paid_key: str | None = None
     rpd_limit: int = DEFAULT_RPD_LIMIT
     usage: dict[str, KeyUsage] = field(default_factory=dict)
     _current_date: date = field(default_factory=date.today)
     _usage_dir: Path = field(default_factory=lambda: USAGE_DIR)
+    _paid_key_warned: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize usage tracking for all keys."""
@@ -79,6 +85,7 @@ class KeyManager:
         Create KeyManager from environment variables.
 
         Looks for GOOGLE_API_KEY_1 through GOOGLE_API_KEY_5.
+        Optionally loads GOOGLE_PAID_KEY as fallback when all free keys exhausted.
         """
         keys = []
         for i in range(1, 6):
@@ -92,17 +99,22 @@ class KeyManager:
                 "environment variables."
             )
 
-        return cls(keys=keys, rpd_limit=rpd_limit)
+        # Load optional paid key as fallback
+        paid_key = os.environ.get("GOOGLE_PAID_KEY")
+
+        return cls(keys=keys, paid_key=paid_key, rpd_limit=rpd_limit)
 
     def get_best_key(self) -> str:
         """
         Return the key with the most remaining RPD quota.
 
+        Falls back to paid_key if all free keys are exhausted.
+
         Returns:
             API key string
 
         Raises:
-            RuntimeError: If all keys are exhausted or rate-limited
+            RuntimeError: If all keys (including paid) are exhausted or rate-limited
         """
         self._check_date_rollover()
 
@@ -122,6 +134,16 @@ class KeyManager:
                 best_key = key
 
         if best_key is None:
+            # Fallback to paid key if available
+            if self.paid_key:
+                if not self._paid_key_warned:
+                    logger.warning(
+                        "All free API keys exhausted or rate-limited, "
+                        "falling back to GOOGLE_PAID_KEY"
+                    )
+                    self._paid_key_warned = True
+                return self.paid_key
+
             raise RuntimeError(
                 "All API keys exhausted or rate-limited. "
                 "Wait for quota reset or add more keys."
@@ -173,11 +195,13 @@ class KeyManager:
         """
         Get the next available key after the current one is rate-limited.
 
+        Falls back to paid_key if all free keys are exhausted.
+
         Args:
             current_key: The key that just hit rate limit
 
         Returns:
-            Next available key, or None if all exhausted
+            Next available key (including paid_key fallback), or None if all exhausted
         """
         self._check_date_rollover()
 

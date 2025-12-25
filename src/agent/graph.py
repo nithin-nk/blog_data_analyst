@@ -7,7 +7,7 @@ This module defines the blog agent graph with:
 
 Graph structure:
     topic_discovery → content_landscape_analysis → planning → research →
-    validate_sources → write_section ↓ (loop) → final_assembly → END
+    validate_sources → write_section ↓ (loop) → final_assembly → human_review → END
 """
 
 from langgraph.graph import END, StateGraph
@@ -15,6 +15,7 @@ from langgraph.graph import END, StateGraph
 from .nodes import (
     content_landscape_analysis_node,
     final_assembly_node,
+    human_review_node,
     planning_node,
     research_node,
     topic_discovery_node,
@@ -43,13 +44,25 @@ def section_router(state: BlogAgentState) -> str:
     return "all_complete"
 
 
+def review_router(state: BlogAgentState) -> str:
+    """
+    Route after human_review_node.
+
+    Returns:
+        END for both approve and quit (future slices may add edit paths)
+    """
+    # Both approve and quit end the pipeline for now
+    # Future slices may add edit/retry paths
+    return END
+
+
 def build_blog_agent_graph() -> StateGraph:
     """
-    Build the blog agent graph with section loop.
+    Build the blog agent graph with section loop and human review.
 
     Graph structure:
         topic_discovery → content_landscape_analysis → planning → research →
-        validate_sources → write_section ↓ (loop) → final_assembly → END
+        validate_sources → write_section ↓ (loop) → final_assembly → human_review → END
 
     Returns:
         Compiled LangGraph StateGraph
@@ -65,6 +78,7 @@ def build_blog_agent_graph() -> StateGraph:
     graph.add_node("validate_sources", validate_sources_node)
     graph.add_node("write_section", write_section_node)
     graph.add_node("final_assembly", final_assembly_node)
+    graph.add_node("human_review", human_review_node)
 
     # Set entry point
     graph.set_entry_point("topic_discovery")
@@ -86,7 +100,8 @@ def build_blog_agent_graph() -> StateGraph:
         },
     )
 
-    # End after assembly (no human review yet in Round 1)
-    graph.add_edge("final_assembly", END)
+    # Assembly → Human Review → END
+    graph.add_edge("final_assembly", "human_review")
+    graph.add_conditional_edges("human_review", review_router)
 
     return graph.compile()

@@ -3,12 +3,15 @@ Unit tests for the graph module.
 
 Tests cover:
 - section_router() routing logic
+- review_router() routing logic
 - build_blog_agent_graph() structure and compilation
 """
 
 import pytest
 
-from src.agent.graph import build_blog_agent_graph, section_router
+from langgraph.graph import END
+
+from src.agent.graph import build_blog_agent_graph, review_router, section_router
 
 
 class TestSectionRouter:
@@ -124,6 +127,34 @@ class TestSectionRouter:
         assert section_router(state) == "all_complete"
 
 
+class TestReviewRouter:
+    """Tests for review_router routing function."""
+
+    def test_review_router_approve_returns_end(self):
+        """Approve decision routes to END."""
+        state = {"human_review_decision": "approve"}
+        result = review_router(state)
+        assert result == END
+
+    def test_review_router_quit_returns_end(self):
+        """Quit decision routes to END."""
+        state = {"human_review_decision": "quit"}
+        result = review_router(state)
+        assert result == END
+
+    def test_review_router_empty_returns_end(self):
+        """Empty decision routes to END."""
+        state = {"human_review_decision": ""}
+        result = review_router(state)
+        assert result == END
+
+    def test_review_router_missing_decision_returns_end(self):
+        """Missing decision key routes to END."""
+        state = {}
+        result = review_router(state)
+        assert result == END
+
+
 class TestBuildBlogAgentGraph:
     """Tests for build_blog_agent_graph function."""
 
@@ -142,7 +173,9 @@ class TestBuildBlogAgentGraph:
 
         # Add nodes (same as build_blog_agent_graph)
         from src.agent.nodes import (
+            content_landscape_analysis_node,
             final_assembly_node,
+            human_review_node,
             planning_node,
             research_node,
             topic_discovery_node,
@@ -151,19 +184,23 @@ class TestBuildBlogAgentGraph:
         )
 
         graph.add_node("topic_discovery", topic_discovery_node)
+        graph.add_node("content_landscape_analysis", content_landscape_analysis_node)
         graph.add_node("planning", planning_node)
         graph.add_node("research", research_node)
         graph.add_node("validate_sources", validate_sources_node)
         graph.add_node("write_section", write_section_node)
         graph.add_node("final_assembly", final_assembly_node)
+        graph.add_node("human_review", human_review_node)
 
         # Check nodes exist
         assert "topic_discovery" in graph.nodes
+        assert "content_landscape_analysis" in graph.nodes
         assert "planning" in graph.nodes
         assert "research" in graph.nodes
         assert "validate_sources" in graph.nodes
         assert "write_section" in graph.nodes
         assert "final_assembly" in graph.nodes
+        assert "human_review" in graph.nodes
 
     def test_graph_has_entry_point(self):
         """Graph has topic_discovery as entry point."""
@@ -175,14 +212,16 @@ class TestBuildBlogAgentGraph:
         assert graph is not None
 
     def test_graph_node_count(self):
-        """Graph has exactly 6 nodes (not counting END)."""
+        """Graph has exactly 8 nodes (not counting END)."""
         from langgraph.graph import StateGraph
         from src.agent.state import BlogAgentState
 
         graph = StateGraph(BlogAgentState)
 
         from src.agent.nodes import (
+            content_landscape_analysis_node,
             final_assembly_node,
+            human_review_node,
             planning_node,
             research_node,
             topic_discovery_node,
@@ -191,13 +230,15 @@ class TestBuildBlogAgentGraph:
         )
 
         graph.add_node("topic_discovery", topic_discovery_node)
+        graph.add_node("content_landscape_analysis", content_landscape_analysis_node)
         graph.add_node("planning", planning_node)
         graph.add_node("research", research_node)
         graph.add_node("validate_sources", validate_sources_node)
         graph.add_node("write_section", write_section_node)
         graph.add_node("final_assembly", final_assembly_node)
+        graph.add_node("human_review", human_review_node)
 
-        assert len(graph.nodes) == 6
+        assert len(graph.nodes) == 8
 
 
 class TestGraphEdges:
