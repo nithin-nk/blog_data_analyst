@@ -315,3 +315,32 @@ async def test_section_selection_groups_required_first(tmp_path):
     # Verify required sections come first, then optional (in plan order)
     selected = result["selected_section_ids"]
     assert selected == ["a", "c", "e", "b", "d"]  # Required first, then optional
+
+
+@pytest.mark.asyncio
+async def test_section_selection_skips_when_phase_past(tmp_path):
+    """Test that section_selection_node skips execution when resuming from a later phase."""
+    state = {
+        "job_id": "test-job",
+        "current_phase": Phase.VALIDATING_SOURCES.value,  # Phase is past section selection
+        "plan": {
+            "sections": [
+                {"id": "a", "title": "A", "optional": False, "role": "hook", "target_words": 100},
+                {"id": "b", "title": "B", "optional": True, "role": "deep_dive", "target_words": 200, "gap_justification": "B"},
+            ]
+        },
+        "current_section_index": 0,
+        "metrics": [],
+    }
+
+    with patch("src.agent.nodes.JobManager") as mock_job_manager:
+        mock_instance = MagicMock()
+        mock_instance.get_job_dir.return_value = tmp_path
+        mock_job_manager.return_value = mock_instance
+
+        # Should NOT prompt for user input - just skip
+        result = await section_selection_node(state)
+
+    # Should return minimal state update without changing phase or selection
+    assert "selected_section_ids" not in result or result.get("selected_section_ids") is None
+    assert result.get("current_phase") != Phase.RESEARCHING.value  # Should not advance phase

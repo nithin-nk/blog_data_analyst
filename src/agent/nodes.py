@@ -2787,6 +2787,11 @@ async def section_selection_node(state: BlogAgentState) -> dict[str, Any]:
     Returns:
         State update with selected_section_ids
     """
+    # Skip if phase already past this node (resumption)
+    if phase_is_past(state.get("current_phase", ""), Phase.SECTION_SELECTION):
+        logger.info("Skipping section_selection_node - phase already past")
+        return _preserve_key_manager(state)
+
     from rich.console import Console
     from rich.table import Table
     from rich.prompt import Prompt, Confirm
@@ -3300,7 +3305,6 @@ async def _validate_section_sources(
     sources: list[dict],
     key_manager: KeyManager,
     all_sections: list[dict] | None = None,
-    min_sources: int = 4,
     max_retries: int = 3,
 ) -> list[dict]:
     """
@@ -3344,9 +3348,16 @@ async def _validate_section_sources(
             structured_llm = llm.with_structured_output(SourceValidationList)
 
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None, lambda: structured_llm.invoke(prompt)
-            )
+            # Add 60-second timeout to prevent hanging indefinitely
+            try:
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: structured_llm.invoke(prompt)),
+                    timeout=60.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"LLM validation call timed out after 60s (attempt {attempt + 1}/{max_retries})")
+                last_error = TimeoutError("API call timed out after 60 seconds")
+                continue  # Retry with next key
 
             key_manager.record_usage(
                 api_key,
@@ -3368,14 +3379,7 @@ async def _validate_section_sources(
                         "reason": validation.reason,
                     })
 
-            logger.info(f"Section {section_id}: {len(validated)}/{len(sources)} sources validated")
-
-            # Warn if below minimum but don't fail
-            if len(validated) < min_sources:
-                logger.warning(
-                    f"Section {section_id} has only {len(validated)} validated sources "
-                    f"(minimum: {min_sources})"
-                )
+            logger.info(f"Section {section_id}: {len(validated)}/{len(sources)} sources validated in this batch")
 
             return validated
 
@@ -3474,7 +3478,7 @@ async def validate_sources_node(state: BlogAgentState) -> dict[str, Any]:
             # Limit sources per section to avoid huge prompts
             sources_to_validate = section_sources[:10]
 
-            logger.info(f"Validating {len(sources_to_validate)} sources for section {section_id}")
+            logger.info(f"Section {section_id}: Validating {len(sources_to_validate)} initial sources (need {MIN_SOURCES_PER_SECTION})")
 
             # First attempt: validate existing sources
             validated = await _validate_section_sources(
@@ -3483,9 +3487,10 @@ async def validate_sources_node(state: BlogAgentState) -> dict[str, Any]:
                 sources=sources_to_validate,
                 key_manager=key_manager,
                 all_sections=sections,
-                min_sources=MIN_SOURCES_PER_SECTION,
             )
             llm_call_count += 1
+
+            logger.info(f"Section {section_id}: {len(validated)}/{MIN_SOURCES_PER_SECTION} sources validated from initial batch")
 
             # Track queries that have been used
             used_queries = set(section.get("search_queries", []))
@@ -3495,8 +3500,8 @@ async def validate_sources_node(state: BlogAgentState) -> dict[str, Any]:
             while len(validated) < MIN_SOURCES_PER_SECTION and retry_count < MAX_VALIDATION_RETRIES:
                 retry_count += 1
                 logger.info(
-                    f"Section {section_id}: {len(validated)} sources (need {MIN_SOURCES_PER_SECTION}), "
-                    f"retry {retry_count}/{MAX_VALIDATION_RETRIES}"
+                    f"Section {section_id}: Retry {retry_count}/{MAX_VALIDATION_RETRIES} - "
+                    f"current total: {len(validated)}, need {MIN_SOURCES_PER_SECTION} (searching for more...)"
                 )
 
                 # Identify sources that were fetched but failed validation
@@ -3537,12 +3542,18 @@ async def validate_sources_node(state: BlogAgentState) -> dict[str, Any]:
                         sources=new_to_validate,
                         key_manager=key_manager,
                         all_sections=sections,
-                        min_sources=MIN_SOURCES_PER_SECTION,
                     )
                     llm_call_count += 1
                     validated.extend(new_validated)
-
-                logger.info(f"After retry {retry_count}: {len(validated)} sources for {section_id}")
+                    logger.info(
+                        f"Section {section_id}: Retry {retry_count} found {len(new_validated)} new sources - "
+                        f"cumulative total: {len(validated)}/{MIN_SOURCES_PER_SECTION}"
+                    )
+                else:
+                    logger.info(
+                        f"Section {section_id}: Retry {retry_count} found 0 new sources - "
+                        f"cumulative total: {len(validated)}/{MIN_SOURCES_PER_SECTION}"
+                    )
 
             validated_sources[section_id] = validated
 
@@ -3556,6 +3567,12 @@ async def validate_sources_node(state: BlogAgentState) -> dict[str, Any]:
                     "validated_sources": validated_sources,
                 },
             )
+
+        # Log detailed summary for each section
+        logger.info("=== Source Validation Summary ===")
+        for section_id, sources in validated_sources.items():
+            status = "✓" if len(sources) >= MIN_SOURCES_PER_SECTION else "⚠"
+            logger.info(f"{status} {section_id}: {len(sources)}/{MIN_SOURCES_PER_SECTION} sources")
 
         total_validated = sum(len(s) for s in validated_sources.values())
         logger.info(f"Validation complete: {total_validated} sources validated across {len(sections)} sections")

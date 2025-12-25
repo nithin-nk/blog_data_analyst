@@ -598,6 +598,7 @@ class JobManager:
         Saves:
         - state.json: phase, section_index, can_resume
         - plan.json: if plan exists
+        - research/cache.json: fetched research content (if present)
         - drafts/sections/{id}.md: each section draft
         """
         job_dir = self.get_job_dir(job_id)
@@ -649,6 +650,12 @@ class JobManager:
         # Save metadata
         if state.get("metadata"):
             self._save_json(job_dir / "metadata.json", state["metadata"])
+
+        # Save research_cache
+        if state.get("research_cache"):
+            cache_file = job_dir / "research" / "cache.json"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            self._save_json(cache_file, state["research_cache"])
 
     def load_state(self, job_id: str) -> BlogAgentState | None:
         """
@@ -718,6 +725,11 @@ class JobManager:
         # Load final
         if (job_dir / "final.md").exists():
             state["final_markdown"] = (job_dir / "final.md").read_text()
+
+        # Load research_cache
+        cache_file = job_dir / "research" / "cache.json"
+        if cache_file.exists():
+            state["research_cache"] = self._load_json(cache_file)
 
         return state
 

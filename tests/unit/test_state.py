@@ -598,6 +598,51 @@ class TestJobManagerSaveLoadState:
         assert len(data["queries_used"]) == 3
         assert len(data["results"]) == 2
 
+    def test_save_and_load_research_cache(self, manager: JobManager):
+        """Research cache is persisted and restored."""
+        job_id = manager.create_job(
+            title="Test Blog",
+            context="Context",
+        )
+
+        # Save state with research_cache
+        research_cache = {
+            "hash123": {
+                "url": "https://example.com",
+                "title": "Example Article",
+                "content": "Test content here",
+                "tokens_estimate": 100,
+            },
+            "hash456": {
+                "url": "https://example.org",
+                "title": "Another Article",
+                "content": "More test content",
+                "tokens_estimate": 150,
+            },
+        }
+
+        state: BlogAgentState = {
+            "current_phase": Phase.VALIDATING_SOURCES.value,
+            "research_cache": research_cache,
+        }
+
+        manager.save_state(job_id, state)
+
+        # Verify file was created
+        job_dir = manager.get_job_dir(job_id)
+        cache_file = job_dir / "research" / "cache.json"
+        assert cache_file.exists()
+
+        # Load state back
+        loaded = manager.load_state(job_id)
+
+        # Verify research_cache is restored
+        assert loaded is not None
+        assert "research_cache" in loaded
+        assert loaded["research_cache"] == research_cache
+        assert len(loaded["research_cache"]) == 2
+        assert loaded["research_cache"]["hash123"]["title"] == "Example Article"
+
 
 class TestJobManagerListJobs:
     """Tests for JobManager.list_jobs method."""
