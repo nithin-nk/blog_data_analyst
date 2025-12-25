@@ -29,6 +29,7 @@ from .config import (
     QUERY_DIVERSIFICATION_MODIFIERS,
     STYLE_GUIDE,
     TARGET_WORDS_MAP,
+    get_llm_config,
 )
 from .punchy_examples import get_example_for_role
 from .key_manager import KeyManager
@@ -357,7 +358,12 @@ async def _generate_discovery_queries(
     Raises:
         RuntimeError: If all API keys exhausted or max retries exceeded
     """
-    model = LLM_MODEL_LITE
+    model, temperature = get_llm_config(
+        "TOPIC_DISCOVERY_MODEL",
+        "TOPIC_DISCOVERY_TEMPERATURE",
+        LLM_MODEL_LITE,
+        LLM_TEMPERATURE_MEDIUM,
+    )
     prompt = f"""Generate 3-5 search queries to learn about this topic:
 
 Title: "{title}"
@@ -381,7 +387,7 @@ Output JSON: {{ "queries": ["...", "...", ...] }}"""
             llm = ChatGoogleGenerativeAI(
                 model=model,
                 google_api_key=api_key,
-                temperature=0.7,
+                temperature=temperature,
             )
 
             # Use with_structured_output for Pydantic validation
@@ -594,6 +600,13 @@ Extract:
 
 Output as ExistingArticleSummary model."""
 
+    model, temperature = get_llm_config(
+        "CONTENT_LANDSCAPE_ANALYZE_MODEL",
+        "CONTENT_LANDSCAPE_ANALYZE_TEMPERATURE",
+        LLM_MODEL_LITE,
+        LLM_TEMPERATURE_LOW,
+    )
+
     last_error = None
 
     for attempt in range(max_retries):
@@ -601,9 +614,9 @@ Output as ExistingArticleSummary model."""
 
         try:
             llm = ChatGoogleGenerativeAI(
-                model=LLM_MODEL_LITE,
+                model=model,
                 google_api_key=api_key,
-                temperature=LLM_TEMPERATURE_LOW,
+                temperature=temperature,
             )
 
             structured_llm = llm.with_structured_output(ExistingArticleSummary)
@@ -717,6 +730,13 @@ Examples of good unique angles:
 
 Output as ContentStrategy model."""
 
+    model, temperature = get_llm_config(
+        "CONTENT_LANDSCAPE_STRATEGY_MODEL",
+        "CONTENT_LANDSCAPE_STRATEGY_TEMPERATURE",
+        LLM_MODEL_LITE,
+        LLM_TEMPERATURE_MEDIUM,
+    )
+
     last_error = None
 
     for attempt in range(max_retries):
@@ -724,9 +744,9 @@ Output as ContentStrategy model."""
 
         try:
             llm = ChatGoogleGenerativeAI(
-                model=LLM_MODEL_LITE,
+                model=model,
                 google_api_key=api_key,
-                temperature=LLM_TEMPERATURE_MEDIUM,
+                temperature=temperature,
             )
 
             structured_llm = llm.with_structured_output(ContentStrategy)
@@ -1484,6 +1504,13 @@ async def _generate_blog_plan(
         replanning_feedback, rejected_sections, scratchpad
     )
 
+    model, temperature = get_llm_config(
+        "PLANNING_OUTLINE_MODEL",
+        "PLANNING_OUTLINE_TEMPERATURE",
+        LLM_MODEL_LITE,
+        LLM_TEMPERATURE_MEDIUM,
+    )
+
     last_error = None
 
     for attempt in range(max_retries):
@@ -1492,9 +1519,9 @@ async def _generate_blog_plan(
         try:
             # Initialize model with structured output
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash-lite",
+                model=model,
                 google_api_key=api_key,
-                temperature=0.7,
+                temperature=temperature,
             )
 
             # Use with_structured_output for Pydantic validation
@@ -1952,6 +1979,13 @@ async def _check_sections_uniqueness_llm(
     """
     prompt = _build_uniqueness_prompt(sections, content_strategy)
 
+    model, temperature = get_llm_config(
+        "PLANNING_UNIQUENESS_MODEL",
+        "PLANNING_UNIQUENESS_TEMPERATURE",
+        LLM_MODEL_FULL,
+        LLM_TEMPERATURE_LOW,
+    )
+
     last_error = None
 
     for attempt in range(max_retries):
@@ -1960,9 +1994,9 @@ async def _check_sections_uniqueness_llm(
         try:
             # Initialize LLM with structured output
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash",
+                model=model,
                 google_api_key=api_key,
-                temperature=0.3,  # Lower temp for consistent evaluation
+                temperature=temperature,
             )
 
             structured_llm = llm.with_structured_output(UniquenessAnalysisResult)
@@ -2186,15 +2220,22 @@ async def _generate_replanning_feedback_llm(
         plan, content_strategy, gap_validation, weak_sections, non_unique_sections
     )
 
+    model, temperature = get_llm_config(
+        "PLANNING_REPLANNING_MODEL",
+        "PLANNING_REPLANNING_TEMPERATURE",
+        LLM_MODEL_FULL,
+        LLM_TEMPERATURE_LOW,
+    )
+
     last_error = None
     for attempt in range(max_retries):
         try:
             api_key = key_manager.get_best_key()
 
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash",
+                model=model,
                 google_api_key=api_key,
-                temperature=0.3,  # Low temp for consistent, structured feedback
+                temperature=temperature,
             )
 
             structured_llm = llm.with_structured_output(ReplanningFeedback)
@@ -3251,6 +3292,13 @@ Generate 2-3 COMPLETELY DIFFERENT search queries that:
 
 Output as AlternativeQueries."""
 
+    model, temperature = get_llm_config(
+        "RESEARCH_ALT_QUERIES_MODEL",
+        "RESEARCH_ALT_QUERIES_TEMPERATURE",
+        LLM_MODEL_LITE,
+        LLM_TEMPERATURE_MEDIUM,
+    )
+
     last_error = None
 
     for attempt in range(max_retries):
@@ -3258,9 +3306,9 @@ Output as AlternativeQueries."""
 
         try:
             llm = ChatGoogleGenerativeAI(
-                model=LLM_MODEL_LITE,
+                model=model,
                 google_api_key=api_key,
-                temperature=LLM_TEMPERATURE_MEDIUM,
+                temperature=temperature,
             )
 
             structured_llm = llm.with_structured_output(AlternativeQueries)
@@ -3333,6 +3381,13 @@ async def _validate_section_sources(
         blog_title, section_title, section_role, sources, all_sections
     )
 
+    model, temperature = get_llm_config(
+        "VALIDATE_SOURCES_MODEL",
+        "VALIDATE_SOURCES_TEMPERATURE",
+        LLM_MODEL_LITE,
+        LLM_TEMPERATURE_LOW,
+    )
+
     last_error = None
 
     for attempt in range(max_retries):
@@ -3340,9 +3395,9 @@ async def _validate_section_sources(
 
         try:
             llm = ChatGoogleGenerativeAI(
-                model=LLM_MODEL_LITE,
+                model=model,
                 google_api_key=api_key,
-                temperature=LLM_TEMPERATURE_LOW,
+                temperature=temperature,
             )
 
             structured_llm = llm.with_structured_output(SourceValidationList)
@@ -3889,6 +3944,13 @@ async def _write_section(
         blog_title=blog_title,
     )
 
+    model, temperature = get_llm_config(
+        "WRITE_SECTION_MODEL",
+        "WRITE_SECTION_TEMPERATURE",
+        LLM_MODEL_FULL,
+        LLM_TEMPERATURE_MEDIUM,
+    )
+
     last_error = None
 
     for attempt in range(max_retries):
@@ -3896,9 +3958,9 @@ async def _write_section(
 
         try:
             llm = ChatGoogleGenerativeAI(
-                model=LLM_MODEL_FULL,
+                model=model,
                 google_api_key=api_key,
-                temperature=LLM_TEMPERATURE_MEDIUM,
+                temperature=temperature,
             )
 
             # Invoke (run in thread pool since langchain may be sync internally)
@@ -4127,10 +4189,17 @@ async def _critic_section(
         style_guide=STYLE_GUIDE,
     )
 
+    model, temperature = get_llm_config(
+        "WRITE_SECTION_CRITIC_MODEL",
+        "WRITE_SECTION_CRITIC_TEMPERATURE",
+        LLM_MODEL_LITE,
+        LLM_TEMPERATURE_LOW,
+    )
+
     # Use Flash-Lite for critic (cheaper, faster)
     llm = ChatGoogleGenerativeAI(
-        model=LLM_MODEL_LITE,
-        temperature=LLM_TEMPERATURE_LOW,
+        model=model,
+        temperature=temperature,
         google_api_key=key_manager.get_best_key(),
     )
 
@@ -4315,10 +4384,17 @@ async def _refine_section(
         additional_sources=additional_sources,
     )
 
+    model, temperature = get_llm_config(
+        "WRITE_SECTION_REFINE_MODEL",
+        "WRITE_SECTION_REFINE_TEMPERATURE",
+        LLM_MODEL_FULL,
+        LLM_TEMPERATURE_LOW,
+    )
+
     # Use Gemini Flash (same as _write_section)
     llm = ChatGoogleGenerativeAI(
-        model=LLM_MODEL_FULL,
-        temperature=LLM_TEMPERATURE_LOW,
+        model=model,
+        temperature=temperature,
         google_api_key=key_manager.get_best_key(),
     )
 
@@ -4949,12 +5025,19 @@ async def _final_critic(
     """
     prompt = _build_final_critic_prompt(draft, plan, blog_title, scratchpad)
 
+    model, temperature = get_llm_config(
+        "FINAL_ASSEMBLY_CRITIC_MODEL",
+        "FINAL_ASSEMBLY_CRITIC_TEMPERATURE",
+        LLM_MODEL_FULL,
+        LLM_TEMPERATURE_LOW,
+    )
+
     for attempt in range(max_retries):
         try:
             # Use Flash (not Lite) for complex whole-blog evaluation
             llm = ChatGoogleGenerativeAI(
-                model=LLM_MODEL_FULL,
-                temperature=LLM_TEMPERATURE_LOW,
+                model=model,
+                temperature=temperature,
                 google_api_key=key_manager.get_best_key(),
             )
 
@@ -5080,12 +5163,19 @@ async def _apply_transition_fixes(
 
     prompt = _build_transition_fix_prompt(draft, fixes)
 
+    model, temperature = get_llm_config(
+        "FINAL_ASSEMBLY_TRANSITIONS_MODEL",
+        "FINAL_ASSEMBLY_TRANSITIONS_TEMPERATURE",
+        LLM_MODEL_FULL,
+        LLM_TEMPERATURE_MEDIUM,
+    )
+
     for attempt in range(max_retries):
         try:
             # Use Flash for rewriting
             llm = ChatGoogleGenerativeAI(
-                model=LLM_MODEL_FULL,
-                temperature=LLM_TEMPERATURE_MEDIUM,
+                model=model,
+                temperature=temperature,
                 google_api_key=key_manager.get_best_key(),
             )
 

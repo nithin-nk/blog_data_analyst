@@ -27,14 +27,53 @@ QUERY_DIVERSIFICATION_MODIFIERS = [
 
 # LLM settings
 LLM_MODEL_LITE = "gemini-2.5-flash-lite"
-LLM_MODEL_FULL = "gemini-2.5-flash"
+LLM_MODEL_FULL = "gemini-3-flash-preview"
 LLM_TEMPERATURE_LOW = 0.3
 LLM_TEMPERATURE_MEDIUM = 0.7
+
+
+def get_llm_config(
+    model_env_var: str,
+    temp_env_var: str,
+    default_model: str,
+    default_temp: float,
+) -> tuple[str, float]:
+    """
+    Get LLM model and temperature from environment variables or defaults.
+
+    Args:
+        model_env_var: Environment variable name for model (e.g., "TOPIC_DISCOVERY_MODEL")
+        temp_env_var: Environment variable name for temperature (e.g., "TOPIC_DISCOVERY_TEMPERATURE")
+        default_model: Default model if env var not set
+        default_temp: Default temperature if env var not set
+
+    Returns:
+        Tuple of (model_name, temperature)
+
+    Examples:
+        >>> get_llm_config("TOPIC_DISCOVERY_MODEL", "TOPIC_DISCOVERY_TEMPERATURE",
+        ...                LLM_MODEL_LITE, LLM_TEMPERATURE_MEDIUM)
+        ('gemini-2.5-flash-lite', 0.7)  # Uses defaults if .env missing
+
+        >>> # With .env: TOPIC_DISCOVERY_MODEL=gemini-2.0-flash-exp
+        >>> get_llm_config("TOPIC_DISCOVERY_MODEL", "TOPIC_DISCOVERY_TEMPERATURE",
+        ...                LLM_MODEL_LITE, LLM_TEMPERATURE_MEDIUM)
+        ('gemini-2.0-flash-exp', 0.7)  # Uses custom model, default temp
+    """
+    import os
+
+    model = os.getenv(model_env_var, default_model)
+    temp_str = os.getenv(temp_env_var)
+    temperature = float(temp_str) if temp_str else default_temp
+
+    return model, temperature
+
 
 # Gemini API Pricing (per 1M tokens, USD)
 GEMINI_PRICING = {
     "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
     "gemini-2.5-flash-lite": {"input": 0.02, "output": 0.08},
+    "gemini-3-flash-preview": {"input": 0.50, "output": 3.00},
 }
 
 # Target word counts (adjusted for punchy style - shorter than formal writing)
