@@ -28,6 +28,7 @@ from .config import (
     STYLE_GUIDE,
     TARGET_WORDS_MAP,
 )
+from .punchy_examples import get_example_for_role
 from .key_manager import KeyManager
 from .state import (
     AlternativeQueries,
@@ -131,6 +132,76 @@ def _finalize_node_metrics(
     if node_name in metrics:
         metrics[node_name]["duration_s"] = duration
     return metrics
+
+
+def _analyze_sentence_lengths(content: str) -> dict[str, Any]:
+    """
+    Analyze sentence structure metrics for punchy style evaluation.
+
+    Splits content into sentences and calculates:
+    - Average sentence length in words
+    - Maximum sentence length
+    - Count of long sentences (> 20 words)
+    - Count of very long sentences (> 25 words)
+    - Count of semicolons (compound sentences)
+    - Percentage of simple sentences (<= 15 words)
+
+    Args:
+        content: Markdown content to analyze
+
+    Returns:
+        Dict with metrics:
+        - avg_length: float (average words per sentence)
+        - max_length: int (longest sentence in words)
+        - long_sentences: int (count of sentences > 20 words)
+        - very_long_sentences: int (count of sentences > 25 words)
+        - semicolons: int (count of semicolons in content)
+        - percent_simple: float (% of sentences <= 15 words)
+        - total_sentences: int (total sentence count)
+    """
+    import re
+
+    # Remove code blocks (they shouldn't count toward sentence metrics)
+    content_without_code = re.sub(r"```.*?```", "", content, flags=re.DOTALL)
+
+    # Split into sentences (. ! ?) followed by space or end of string
+    # This regex handles common cases while avoiding splits on "e.g." or "i.e."
+    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", content_without_code)
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    if not sentences:
+        return {
+            "avg_length": 0.0,
+            "max_length": 0,
+            "long_sentences": 0,
+            "very_long_sentences": 0,
+            "semicolons": 0,
+            "percent_simple": 100.0,
+            "total_sentences": 0,
+        }
+
+    # Calculate word counts per sentence
+    word_counts = [len(s.split()) for s in sentences]
+
+    avg_length = sum(word_counts) / len(word_counts)
+    max_length = max(word_counts)
+    long_sentences = sum(1 for wc in word_counts if wc > 20)
+    very_long_sentences = sum(1 for wc in word_counts if wc > 25)
+    simple_sentences = sum(1 for wc in word_counts if wc <= 15)
+    percent_simple = (simple_sentences / len(word_counts)) * 100
+
+    # Count semicolons (indicator of compound sentences)
+    semicolons = content_without_code.count(";")
+
+    return {
+        "avg_length": round(avg_length, 1),
+        "max_length": max_length,
+        "long_sentences": long_sentences,
+        "very_long_sentences": very_long_sentences,
+        "semicolons": semicolons,
+        "percent_simple": round(percent_simple, 1),
+        "total_sentences": len(sentences),
+    }
 
 
 # =============================================================================
@@ -997,30 +1068,56 @@ def _build_planning_prompt(
 5. Do NOT just rehash what existing articles already cover well
 """
 
-    return f"""You are planning a technical blog post.
+    return f"""You are planning a technical blog post with short, punchy writing. Each section should be FOCUSED and SPECIFIC.
 
-Blog structure must follow:
-1. Hook (optional) - story, surprising stat, or provocative question
-2. Problem - what's broken with current approach
-3. Why - why new approach matters
-4. Subtopics - 4-6 deep_dive sections (user will select which ones to include)
-5. Conclusion - practical takeaways
+Blog structure should be:
+1. Hook (optional) - brief problem statement or context (2-3 paragraphs, no heading)
+2. Problem/Why section - what's broken and why it matters (can combine into one)
+3. Core Implementation - code-heavy section showing the main approach
+4. Technique sections - 3-5 specific techniques/patterns (e.g., "Validate Before Storing", "Tune Similarity Threshold")
+5. Drawbacks/Tradeoffs (if relevant) - honest limitations
+6. Conclusion - brief practical takeaways
+
+CRITICAL: SECTION GRANULARITY FOR PUNCHY WRITING
+- Each section covers ONE specific technique or idea
+- Break broad topics into focused, bite-sized sections
+- Granular sections = naturally shorter, punchier writing
+
+Examples:
+❌ BAD (too broad): "Caching Strategies and Performance Tuning"
+   → Forces long, complex explanations that kill punchy style
+
+✅ GOOD (granular, focused):
+   → "Cache Lookups" (one section)
+   → "Similarity Thresholds" (separate section)
+   → "Performance Impact" (separate section)
+   Each section stays focused, sentences stay short
+
+❌ BAD: "Advanced Redis Features"
+✅ GOOD: "Vector Search with RediSearch" + "TTL Management"
+
+IMPORTANT GUIDELINES:
+- Prefer granular, technique-focused sections over generic theory sections
+- Each technique section should have a specific, actionable title (not "Best Practices")
+- Implementation sections MUST have needs_code=true
+- Code should be 50-70% of implementation sections (PRIMARY content)
+- Include a "Drawbacks" or "Tradeoffs" section when the topic has real limitations
+- Limit to 6-8 sections MAXIMUM (prevents over-slicing)
 
 For each section, provide:
 - id (unique string identifier, e.g., "hook", "problem", "implementation")
 - title (section heading, null for hook)
-- role (hook/problem/why/implementation/deep_dive/conclusion)
-- search_queries (2-3 specific queries for research)
-- needs_code (true/false - whether section needs code examples)
+- role (hook/problem/why/implementation/deep_dive/conclusion/tradeoffs)
+- search_queries (2-3 specific queries - prefer "X code example", "X github", "X implementation")
+- needs_code (true for ALL implementation/deep_dive sections)
 - needs_diagram (true if architecture/flow explanation needed)
 - target_words (distribute {target_words} total across REQUIRED sections only)
-- optional (true for 2 extra deep_dive sections user can choose from)
+- optional (true for 2 extra sections user can choose from)
 
 ## Required vs Optional Sections
-- hook, problem, why, conclusion: ALWAYS set optional=false (these are required)
-- deep_dive/implementation sections: Generate 4-6 total, mark 2 as optional=true
-- The 2 optional sections are extra choices for the user to pick from
-- Word counts for optional sections should be estimated (will be pro-rated if selected)
+- hook, problem/why, conclusion: ALWAYS set optional=false
+- implementation/deep_dive sections: Generate 4-6 total, mark 2 as optional=true
+- tradeoffs section: optional=false if topic has significant drawbacks
 
 ## Blog Topic
 Title: "{title}"
@@ -1993,42 +2090,107 @@ def _build_writer_prompt(
 
     formatted_sources = _format_sources_for_prompt(sources)
 
-    # Build role-specific instructions
+    # Build role-specific instructions with sentence structure requirements
     role_instructions = ""
+
+    # Sentence structure requirements (common to all roles)
+    sentence_requirements = """
+SENTENCE STRUCTURE (CRITICAL):
+- 5-15 words per sentence (STRICT constraint)
+- Average 10-14 words for this section
+- One idea per sentence
+- No semicolons or nested clauses
+- Active voice preferred
+- Use fragments when natural ("Still, important.")
+"""
+
     if section_role == "hook":
-        role_instructions = """
-This is the HOOK section. Your goal is to grab the reader's attention immediately.
-- Start with a surprising stat, a provocative question, or a relatable problem
+        role_instructions = f"""
+This is the HOOK section. Grab attention immediately with punchy, direct language.
+
+{sentence_requirements}
+
+CONTENT GUIDELINES:
+- Start with a surprising stat, provocative question, or relatable problem
 - Do NOT use a title/heading for this section
-- Keep it punchy and intriguing (2-3 paragraphs max)
+- 2-3 paragraphs max
+- Short, punchy sentences that hook the reader
+
+{get_example_for_role("hook")}
 """
     elif section_role == "problem":
-        role_instructions = """
-This is the PROBLEM section. Clearly explain what's broken with current approaches.
-- Describe the pain points engineers face
+        role_instructions = f"""
+This is the PROBLEM section. Explain what's broken. Use bullets. Be direct.
+
+{sentence_requirements}
+
+CONTENT GUIDELINES:
+- State the problem directly, no hype
 - Use specific, relatable examples
-- Create urgency for finding a solution
+- Show WHY it fails (e.g., exact match vs semantic)
+- Bullet points work well for listing issues
+- Keep each point short and punchy
+
+{get_example_for_role("problem")}
 """
     elif section_role == "why":
-        role_instructions = """
-This is the WHY section. Explain why the new approach matters.
-- Connect the solution to the problems described earlier
-- Highlight the key benefits
-- Set up the reader for the implementation details
+        role_instructions = f"""
+This is the WHY section. Explain why the new approach matters. Stay punchy.
+
+{sentence_requirements}
+
+CONTENT GUIDELINES:
+- Connect solution to problems described earlier
+- Highlight key benefits in short sentences
+- Set up the reader for implementation
+- No fluff or marketing speak
+
+{get_example_for_role("why")}
 """
     elif section_role in ["implementation", "deep_dive"]:
-        role_instructions = """
-This is a DEEP DIVE / IMPLEMENTATION section. Provide technical depth.
-- Include working code examples with imports
-- Explain the "why" behind technical decisions
-- Be specific with tool names, config options, and commands
+        role_instructions = f"""
+This is an IMPLEMENTATION section. Code is 50-70% of this section. Let code speak.
+
+{sentence_requirements}
+
+CONTENT GUIDELINES:
+- 50-70% of this section should be code examples
+- Explain in 1-2 sentences max before/after each code block
+- Show complete, runnable code with imports (not snippets)
+- Each code block demonstrates ONE specific technique
+- No long narratives - minimal commentary
+- Code is the PRIMARY teaching tool
+
+{get_example_for_role("implementation")}
+"""
+    elif section_role == "tradeoffs":
+        role_instructions = f"""
+This is the DRAWBACKS section. Be honest. Be direct. Use bullets.
+
+{sentence_requirements}
+
+CONTENT GUIDELINES:
+- List specific drawbacks and edge cases
+- Mention when this approach is NOT suitable
+- Quantify overhead if possible (latency, cost, complexity)
+- Short bullet points work best
+- No sugar-coating
+
+{get_example_for_role("tradeoffs")}
 """
     elif section_role == "conclusion":
-        role_instructions = """
-This is the CONCLUSION section. Provide actionable takeaways.
-- Summarize the key points (don't just repeat)
-- Give the reader clear next steps
-- End with a memorable thought or call-to-action
+        role_instructions = f"""
+This is the CONCLUSION section. Quick summary. Clear next steps. Stay punchy.
+
+{sentence_requirements}
+
+CONTENT GUIDELINES:
+- Summarize key points (don't repeat)
+- Give clear next steps
+- 1 paragraph max
+- Action-oriented, brief
+
+{get_example_for_role("conclusion")}
 """
 
     # Code/diagram requirements
@@ -2223,6 +2385,9 @@ def _build_critic_prompt(
                     history_text += f"  Score changes: {changes_str}\n"
         history_text += "\n"
 
+    # Analyze sentence structure metrics
+    metrics = _analyze_sentence_lengths(content)
+
     prompt = f"""You are an expert technical blog critic. Evaluate this section on 8 dimensions (1-10 scale).
 
 **Overall Blog Context:**{context_info}
@@ -2241,16 +2406,17 @@ def _build_critic_prompt(
 
 **Actual word count:** {actual_words}
 
+**Sentence Structure Metrics (for voice evaluation):**
+- Average sentence length: {metrics['avg_length']} words
+- Longest sentence: {metrics['max_length']} words
+- Sentences > 20 words: {metrics['long_sentences']}
+- Sentences > 25 words: {metrics['very_long_sentences']}
+- Semicolons: {metrics['semicolons']}
+- Simple sentences (≤15 words): {metrics['percent_simple']:.1f}%
+- Total sentences: {metrics['total_sentences']}
+
 **Writing Style Guidelines:**
 {style_guide}
-
-Evaluate the "voice" dimension based on adherence to these guidelines:
-- Does it use direct, technical language?
-- Is it opinionated (says "you need" not "you might consider")?
-- Short sentences and paragraphs?
-- Bullet points used effectively?
-- No fluff phrases?
-- Addresses reader as "you"?
 {history_text}
 **Evaluation Criteria:**
 
@@ -2258,7 +2424,25 @@ Evaluate the "voice" dimension based on adherence to these guidelines:
 2. **completeness (1-10):** Does it cover all necessary aspects? Any gaps?
 3. **code_quality (1-10):** If code present: Is it runnable, includes imports, follows best practices? (10 if no code needed)
 4. **clarity (1-10):** Is it easy to understand? Clear explanations?
-5. **voice (1-10):** Does it follow the direct, opinionated technical style? No fluff?
+5. **voice (1-10):** PUNCHY STYLE EVALUATION with HARD METRICS:
+   - Start at 10, then apply deductions:
+   - If avg_length > 16 words: Deduct 2 points
+   - If avg_length > 18 words: Deduct 3 points (total)
+   - If any sentence > 25 words: Deduct 1 point per sentence
+   - If semicolons > 0: Deduct 1 point
+   - If simple sentences < 70%: Deduct 1 point
+   - If contains "therefore", "however", "moreover", "furthermore": Deduct 1 point total
+   - If uses "leverage", "utilize", "facilitate" instead of simple verbs: Deduct 1 point
+
+   **Target metrics for score 10:**
+   - Avg: 10-14 words
+   - No sentences > 20 words
+   - No semicolons
+   - Simple sentences > 80%
+
+   **Score 7-9:** Avg 12-16 words, 1-2 long sentences
+   **Score 4-6:** Avg 15-18 words, several long sentences
+   **Score 1-3:** Avg > 18 words, academic/formal style
 6. **originality (1-10):** Original insights, not just paraphrasing?
 7. **length (1-10):** Word count appropriate? (8-10: ±20% of target, 5-7: ±40%, 1-4: >40% off)
 8. **diagram_quality (1-10):** If diagram present: Is it clear and helpful? (10 if no diagram needed)
@@ -2453,11 +2637,17 @@ def _build_refiner_prompt(
 1. Read the current content carefully
 2. Address EACH issue listed above with the suggested fixes
 3. Preserve parts that are working well (high-scoring dimensions)
-4. Follow the writing style guidelines above (direct, opinionated, short sentences, no fluff)
-5. Keep word count near target ({target_words} words)
-6. Ensure code examples are runnable with imports
-7. Use original insights, not paraphrasing
-8. If additional research sources are provided, incorporate relevant information to fill knowledge gaps
+4. **CRITICAL FOR VOICE/STYLE ISSUES:**
+   - Break long sentences into multiple short ones (5-15 words each)
+   - Use simple words. Avoid complex constructions.
+   - Replace "however, therefore, moreover" with punchy fragments
+   - Replace "leverage, utilize, facilitate" with simple verbs (use, help, enable)
+   - **Preserve original insights** - improve sentence structure only, don't lose unique ideas
+5. Follow the writing style guidelines above (direct, opinionated, short sentences, no fluff)
+6. Keep word count near target ({target_words} words, ±20%)
+7. Ensure code examples are runnable with imports
+8. Use original insights, not paraphrasing
+9. If additional research sources are provided, incorporate relevant information to fill knowledge gaps
 
 Output ONLY the refined markdown section. Do not include explanations or meta-commentary.
 """
@@ -2963,6 +3153,9 @@ def _build_final_critic_prompt(
 
     word_count = len(draft.split())
 
+    # Analyze overall sentence structure metrics for entire blog
+    overall_metrics = _analyze_sentence_lengths(draft)
+
     prompt = f"""You are an expert technical blog editor. Evaluate this complete blog post on 7 whole-blog dimensions (1-10 scale).
 
 **Blog Title:** {blog_title}
@@ -2977,11 +3170,27 @@ def _build_final_critic_prompt(
 
 **Word Count:** {word_count}
 
+**Overall Sentence Structure Metrics:**
+- Average sentence length: {overall_metrics['avg_length']} words
+- Longest sentence: {overall_metrics['max_length']} words
+- Sentences > 20 words: {overall_metrics['long_sentences']}
+- Simple sentences (≤15 words): {overall_metrics['percent_simple']:.1f}%
+
 **Evaluation Criteria (7 Dimensions):**
 
 1. **coherence (1-10):** Do sections flow logically? Do ideas connect well between sections? Is there a clear thread throughout?
 
-2. **voice_consistency (1-10):** Same author voice throughout? No jarring shifts in tone, style, or technical level?
+2. **voice_consistency (1-10):** PUNCHY STYLE CONSISTENCY across all sections.
+   - Check if sentence length is consistent throughout (avg should be 10-14 words across all sections)
+   - Verify NO sections drift into formal/academic style (check for long sentences)
+   - Flag any section that has avg > 16 words
+   - Check for consistent conversational tone
+   - No jarring shifts in technical level or formality
+
+   **Deduct points if:**
+   - Overall avg > 15 words: Deduct 2 points
+   - Any section significantly longer/shorter than others: Deduct 1 point
+   - Mix of punchy and formal styles: Deduct 2 points
 
 3. **no_redundancy (1-10):** No repeated information across sections? Each section adds new value without rehashing previous content?
 

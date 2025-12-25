@@ -218,6 +218,8 @@ async def _run_start(title: str, context: str, length: str):
             async for event in graph.astream(initial_state):
                 # event is a dict with node name as key
                 for node_name, node_output in event.items():
+                    if node_output is None:
+                        continue  # Skip nodes that returned None (e.g., skipped nodes)
                     result = {**result, **node_output}
 
                     current_phase = result.get("current_phase", "")
@@ -361,6 +363,8 @@ async def _run_resume(job_id: str):
             async for event in graph.astream(state):
                 # event is a dict with node name as key
                 for node_name, node_output in event.items():
+                    if node_output is None:
+                        continue  # Skip nodes that returned None (e.g., skipped nodes)
                     result = {**result, **node_output}
 
                     current_phase = result.get("current_phase", "")

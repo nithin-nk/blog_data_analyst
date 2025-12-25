@@ -495,10 +495,12 @@ def check_originality(
     """
     Check for similarity between content and source texts.
 
+    Uses adaptive thresholds to avoid false positives on short, punchy sentences.
+
     Args:
         content: Written content to check
         sources: List of source documents with "url" and "content" keys
-        threshold: Similarity threshold (default 0.7 = 70%)
+        threshold: Base similarity threshold for longer sentences (default 0.7)
 
     Returns:
         List of flagged items with:
@@ -511,6 +513,8 @@ def check_originality(
         for f in flags:
             print(f"Possible copy: {f['sentence'][:50]}...")
     """
+    from .config import ORIGINALITY_THRESHOLD_SHORT_SENTENCES
+
     if not content or not sources:
         return []
 
@@ -520,9 +524,15 @@ def check_originality(
     for sentence in sentences:
         sentence = sentence.strip()
 
-        # Skip short sentences
+        # Skip very short sentences (< 20 characters, likely fragments)
         if len(sentence) < 20:
             continue
+
+        # Use higher threshold for short sentences to avoid false positives
+        # Short punchy sentences like "This is important." are more likely to
+        # accidentally match common phrases in sources
+        word_count = len(sentence.split())
+        sentence_threshold = ORIGINALITY_THRESHOLD_SHORT_SENTENCES if word_count < 10 else threshold
 
         for source in sources:
             source_content = source.get("content", "")
@@ -538,7 +548,7 @@ def check_originality(
                 source_content.lower()
             ).ratio()
 
-            if similarity > threshold:
+            if similarity > sentence_threshold:
                 flagged.append({
                     "sentence": sentence,
                     "similar_to": source_url,

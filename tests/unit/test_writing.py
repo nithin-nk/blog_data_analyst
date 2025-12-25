@@ -21,6 +21,7 @@ from src.agent.nodes import (
     _critic_section,
     _refine_section,
     write_section_node,
+    _analyze_sentence_lengths,
 )
 from src.agent.state import CriticIssue, CriticScore, Phase, SectionCriticResult
 
@@ -187,7 +188,7 @@ class TestBuildWriterPrompt:
         )
 
         assert "DEEP DIVE" in prompt
-        assert "technical depth" in prompt
+        assert "PRIMARY content" in prompt
 
     def test_conclusion_role_instructions(self):
         """Conclusion role gets takeaway instructions."""
@@ -1096,3 +1097,92 @@ class TestSectionRefine:
             mock_build_prompt.assert_called_once()
             call_kwargs = mock_build_prompt.call_args[1]
             assert call_kwargs["scratchpad"] == scratchpad
+
+
+class TestAnalyzeSentenceLengths:
+    """Tests for _analyze_sentence_lengths helper function."""
+
+    def test_empty_content(self):
+        """Returns zero metrics for empty content."""
+        result = _analyze_sentence_lengths("")
+        assert result["avg_length"] == 0.0
+        assert result["max_length"] == 0
+        assert result["long_sentences"] == 0
+        assert result["very_long_sentences"] == 0
+        assert result["semicolons"] == 0
+        assert result["percent_simple"] == 100.0
+        assert result["total_sentences"] == 0
+
+    def test_punchy_content(self):
+        """Correctly analyzes content with short, punchy sentences."""
+        content = """
+        Caching is important. LLM agents take time to run. Inference is expensive.
+        Traditional caching fails. It works on exact matching. Natural language rarely matches exactly.
+        """
+        result = _analyze_sentence_lengths(content)
+
+        # Should have 6 sentences, all short
+        assert result["total_sentences"] == 6
+        assert result["avg_length"] <= 15  # All sentences are short
+        assert result["long_sentences"] == 0  # No sentences > 20 words
+        assert result["very_long_sentences"] == 0  # No sentences > 25 words
+        assert result["semicolons"] == 0
+        assert result["percent_simple"] == 100.0  # All sentences <= 15 words
+
+    def test_formal_content(self):
+        """Correctly analyzes formal content with long sentences."""
+        content = """
+        Caching presents a crucial optimization opportunity because LLM agents typically require significant execution time and inference operations incur substantial costs.
+        Traditional caching mechanisms prove ineffective due to their reliance on exact string matching, which is fundamentally ill-suited to the inherent variability present in natural language inputs.
+        """
+        result = _analyze_sentence_lengths(content)
+
+        assert result["total_sentences"] == 2
+        assert result["avg_length"] > 18  # Both sentences are long
+        assert result["long_sentences"] >= 1  # At least one sentence > 20 words
+        assert result["max_length"] > 20  # Max is over 20 words
+        assert result["percent_simple"] == 0.0  # No sentences <= 15 words
+
+    def test_mixed_content(self):
+        """Correctly analyzes content with mix of short and long sentences."""
+        content = """
+        This is short. This sentence is also relatively brief and concise.
+        However, this particular sentence is significantly longer and contains many more words than the previous ones, demonstrating a departure from the punchy style that we prefer.
+        Back to short again.
+        """
+        result = _analyze_sentence_lengths(content)
+
+        assert result["total_sentences"] == 4
+        assert result["avg_length"] > 10  # Mix brings average up
+        assert result["long_sentences"] == 1  # One long sentence
+        assert result["percent_simple"] == 75.0  # 3 out of 4 are simple
+
+    def test_code_blocks_excluded(self):
+        """Code blocks should not be counted in sentence metrics."""
+        content = """
+        Here's a code example. It demonstrates the technique.
+
+        ```python
+        # This is code with a semicolon;
+        x = 1; y = 2; z = 3
+        ```
+
+        The code works well.
+        """
+        result = _analyze_sentence_lengths(content)
+
+        # Should only count the 3 text sentences, not code
+        assert result["total_sentences"] == 3
+        assert result["semicolons"] == 0  # Code block semicolons don't count
+        assert result["avg_length"] <= 10  # All text sentences are short
+
+    def test_semicolons_counted(self):
+        """Semicolons in text (not code) are counted."""
+        content = """
+        Traditional caching fails; it works on exact matching.
+        However, semantic caching succeeds; it understands meaning.
+        """
+        result = _analyze_sentence_lengths(content)
+
+        assert result["semicolons"] == 2  # Two semicolons in text
+        assert result["total_sentences"] == 2
