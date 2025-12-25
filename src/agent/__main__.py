@@ -31,7 +31,10 @@ console = Console()
 # Phase display messages
 PHASE_MESSAGES = {
     "topic_discovery": ("🔍", "Discovering topic and generating search queries..."),
+    "content_landscape": ("🌐", "Analyzing content landscape..."),
     "planning": ("📋", "Creating blog outline and section plan..."),
+    "preview_validation": ("🔎", "Validating plan quality..."),
+    "section_selection": ("📝", "Waiting for section selection..."),
     "researching": ("🔬", "Researching sources from the web..."),
     "validating_sources": ("✓", "Validating source quality and relevance..."),
     "writing": ("✍️", "Writing sections..."),
@@ -174,16 +177,26 @@ def cli():
     default="medium",
     help="Target blog length",
 )
-def start(title: str, context: str, length: str):
+@click.option(
+    "--auto-select",
+    is_flag=True,
+    default=False,
+    help="Skip section selection and include all sections automatically",
+)
+def start(title: str, context: str, length: str, auto_select: bool):
     """Start a new blog generation job."""
-    asyncio.run(_run_start(title, context, length))
+    asyncio.run(_run_start(title, context, length, auto_select))
 
 
-async def _run_start(title: str, context: str, length: str):
+async def _run_start(title: str, context: str, length: str, auto_select: bool = False):
     """Execute the blog generation pipeline with real-time progress updates."""
     console.print(f"\n[bold blue]🚀 Blog Agent[/bold blue]")
     console.print(f"[dim]Title:[/dim] {title}")
-    console.print(f"[dim]Length:[/dim] {length}\n")
+    console.print(f"[dim]Length:[/dim] {length}")
+    if auto_select:
+        console.print(f"[dim]Auto-select:[/dim] All sections will be included\n")
+    else:
+        console.print("")
 
     # Create or resume job
     job_manager = JobManager()
@@ -214,6 +227,7 @@ async def _run_start(title: str, context: str, length: str):
             "current_phase": Phase.TOPIC_DISCOVERY.value,
             "current_section_index": 0,
             "section_drafts": {},
+            "section_selection_skipped": auto_select,  # Skip interactive selection if --auto-select flag set
             "flags": {},
             "key_manager": KeyManager.from_env(),
         }
@@ -246,9 +260,15 @@ async def _run_start(title: str, context: str, length: str):
                             icon, _ = PHASE_MESSAGES.get(last_phase, ("✓", ""))
                             console.print(f"  [green]✓[/green] {last_phase.replace('_', ' ').title()} complete")
 
-                        # Stop spinner for human review phase (needs interactive input)
-                        if current_phase == Phase.REVIEWING.value:
-                            status.stop()
+                        # Stop spinner for phases that need interactive input
+                        if current_phase in [Phase.SECTION_SELECTION.value, Phase.REVIEWING.value]:
+                            # Check if section selection is auto-skipped
+                            if current_phase == Phase.SECTION_SELECTION.value and result.get("section_selection_skipped"):
+                                # Auto-select enabled, keep spinner running
+                                status.update(_get_phase_message(current_phase))
+                            else:
+                                # Interactive input needed, stop spinner
+                                status.stop()
                         else:
                             # Update spinner for new phase
                             status.update(_get_phase_message(current_phase))

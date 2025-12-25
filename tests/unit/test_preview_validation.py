@@ -427,8 +427,8 @@ class TestPreviewValidationNode:
 
                 result = await preview_validation_node(state)
 
-                # Should advance to RESEARCHING
-                assert result["current_phase"] == Phase.RESEARCHING.value
+                # Should advance to SECTION_SELECTION
+                assert result["current_phase"] == Phase.SECTION_SELECTION.value
                 assert result["preview_validation_result"]["all_sections_pass"] is True
 
                 # Should have scratchpad entry
@@ -532,8 +532,8 @@ class TestPreviewValidationRouter:
 
     def test_router_proceed_to_research(self):
         """Test router when validation passes."""
-        state = {"current_phase": Phase.RESEARCHING.value}
-        assert preview_validation_router(state) == "research"
+        state = {"current_phase": Phase.SECTION_SELECTION.value}
+        assert preview_validation_router(state) == "section_selection"
 
     def test_router_replan(self):
         """Test router when validation fails."""
@@ -543,4 +543,4 @@ class TestPreviewValidationRouter:
     def test_router_default_fallback(self):
         """Test router with unexpected phase."""
         state = {"current_phase": "UNEXPECTED"}
-        assert preview_validation_router(state) == "research"
+        assert preview_validation_router(state) == "section_selection"

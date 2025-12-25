@@ -81,7 +81,7 @@ class TestStartCommand:
         ])
 
         # Note: asyncio.run wraps _run_start, so we check it was called
-        mock_run_start.assert_called_once_with("Test Title", "Test context", "short")
+        mock_run_start.assert_called_once_with("Test Title", "Test context", "short", False)
 
     @patch("src.agent.__main__._run_start")
     def test_start_default_length_medium(self, mock_run_start, runner):
@@ -94,7 +94,7 @@ class TestStartCommand:
             "--context", "Test",
         ])
 
-        mock_run_start.assert_called_once_with("Test", "Test", "medium")
+        mock_run_start.assert_called_once_with("Test", "Test", "medium", False)
 
 
 class TestResumeCommand:
@@ -247,6 +247,7 @@ class TestRunStart:
             mock_jm = MagicMock()
             mock_jm.create_job.return_value = "test-job-id"
             mock_jm.get_job_dir.return_value = tmp_path
+            mock_jm.load_state.return_value = None  # Force new job creation (not resume)
             MockJM.return_value = mock_jm
 
             mock_graph = MagicMock()
@@ -259,7 +260,7 @@ class TestRunStart:
             # Create mock final.md
             (tmp_path / "final.md").write_text("test")
 
-            await _run_start("Test Title", "Test context", "short")
+            await _run_start("Test Title", "Test context", "short", False)
 
             mock_jm.create_job.assert_called_once_with("Test Title", "Test context", "short")
 

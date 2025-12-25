@@ -597,7 +597,10 @@ class TestContentLandscapeAnalysisNode:
 
         result = await content_landscape_analysis_node(state)
 
-        assert result["content_strategy"] is None
+        # Should return default strategy, not None
+        assert result["content_strategy"] is not None
+        assert isinstance(result["content_strategy"], dict)
+        assert result["content_strategy"]["unique_angle"] != ""
         assert result["current_phase"] == Phase.PLANNING.value
 
     @pytest.mark.asyncio
@@ -676,13 +679,22 @@ class TestContentLandscapeAnalysisNode:
 
     @pytest.mark.asyncio
     async def test_handles_runtime_error(self, sample_state):
-        """Node handles RuntimeError gracefully."""
-        with patch("src.agent.nodes.KeyManager") as mock_km:
-            mock_km.from_env.side_effect = RuntimeError("No API keys")
+        """Node handles RuntimeError gracefully by returning default strategy."""
+        with patch("src.agent.nodes.JobManager") as mock_jm:
+            with patch("builtins.open", MagicMock()):
+                mock_instance = MagicMock()
+                mock_instance.get_job_dir.return_value = MagicMock()
+                mock_jm.return_value = mock_instance
 
-            result = await content_landscape_analysis_node(sample_state)
+                with patch("src.agent.nodes.KeyManager") as mock_km:
+                    mock_km.from_env.side_effect = RuntimeError("No API keys")
 
-            assert result["current_phase"] == Phase.FAILED.value
+                    result = await content_landscape_analysis_node(sample_state)
+
+                    # Should return default strategy and continue, not fail
+                    assert result["current_phase"] == Phase.PLANNING.value
+                    assert result["content_strategy"] is not None
+                    assert "Content analysis failed" in result["content_strategy"]["existing_content_summary"]
 
 
 # =============================================================================

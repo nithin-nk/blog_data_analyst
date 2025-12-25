@@ -86,7 +86,7 @@ class TestTopicDiscoveryNode:
         mock_discovery_queries,
         mock_search_results,
     ):
-        """Phase advances to PLANNING on success."""
+        """Phase advances to CONTENT_LANDSCAPE on success."""
         with patch("src.agent.nodes._generate_discovery_queries") as mock_gen:
             with patch("src.agent.nodes._execute_searches") as mock_search:
                 with patch("src.agent.nodes.KeyManager") as mock_km:
@@ -98,7 +98,7 @@ class TestTopicDiscoveryNode:
 
                         result = await topic_discovery_node(sample_state)
 
-                        assert result["current_phase"] == Phase.PLANNING.value
+                        assert result["current_phase"] == Phase.CONTENT_LANDSCAPE.value
 
     @pytest.mark.asyncio
     async def test_fails_without_title(self):

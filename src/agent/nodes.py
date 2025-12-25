@@ -7,8 +7,10 @@ Nodes are async functions that handle one phase of the pipeline.
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
+from datetime import datetime
 from typing import Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -301,7 +303,7 @@ async def topic_discovery_node(state: BlogAgentState) -> dict[str, Any]:
             job_manager.save_state(
                 job_id,
                 {
-                    "current_phase": Phase.PLANNING.value,
+                    "current_phase": Phase.CONTENT_LANDSCAPE.value,
                     "discovery_queries": queries,
                     "topic_context": topic_context,
                 },
@@ -310,7 +312,7 @@ async def topic_discovery_node(state: BlogAgentState) -> dict[str, Any]:
         return {
             "discovery_queries": queries,
             "topic_context": topic_context,
-            "current_phase": Phase.PLANNING.value,
+            "current_phase": Phase.CONTENT_LANDSCAPE.value,
             "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
@@ -811,9 +813,50 @@ async def content_landscape_analysis_node(state: BlogAgentState) -> dict[str, An
         }
 
     if not topic_context:
-        logger.warning("No topic context available, skipping content landscape analysis")
+        logger.warning("No topic context available, creating default content strategy without landscape insights")
+
+        # Create minimal default strategy (as dict, bypassing Pydantic validation)
+        # This ensures content_strategy is always available, even when landscape analysis skips
+        strategy_dict = {
+            "unique_angle": "Practical technical guide with concrete examples",
+            "target_persona": "senior_engineer",
+            "reader_problem": f"Understanding and implementing {title}",
+            "gaps_to_fill": [
+                {
+                    "gap_type": "insufficient_depth",
+                    "description": "No landscape analysis available",
+                    "opportunity": "Provide comprehensive coverage based on user context",
+                }
+            ],
+            "existing_content_summary": "No existing content analyzed due to missing topic context",
+            "analyzed_articles": [],  # Empty - no articles available
+            "differentiation_requirements": [
+                "Include working code examples",
+                "Focus on practical implementation details",
+            ],
+        }
+
+        # Save checkpoint if job_id exists
+        if job_id:
+            job_manager = JobManager()
+            job_dir = job_manager.get_job_dir(job_id)
+
+            import json
+            strategy_path = job_dir / "content_strategy.json"
+            with open(strategy_path, "w") as f:
+                json.dump(strategy_dict, f, indent=2)
+            logger.info(f"Saved default content strategy to {strategy_path}")
+
+            job_manager.save_state(
+                job_id,
+                {
+                    "current_phase": Phase.PLANNING.value,
+                    "content_strategy": strategy_dict,
+                },
+            )
+
         return {
-            "content_strategy": None,
+            "content_strategy": strategy_dict,
             "current_phase": Phase.PLANNING.value,
             "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
@@ -971,16 +1014,98 @@ async def content_landscape_analysis_node(state: BlogAgentState) -> dict[str, An
 
     except RuntimeError as e:
         logger.error(f"Content landscape analysis failed: {e}")
+        logger.warning("Creating default content strategy to allow pipeline to continue")
+
+        # Create minimal default strategy instead of failing
+        strategy_dict = {
+            "unique_angle": "Practical technical guide with concrete examples",
+            "target_persona": "senior_engineer",
+            "reader_problem": f"Understanding and implementing {title}",
+            "gaps_to_fill": [
+                {
+                    "gap_type": "insufficient_depth",
+                    "description": "Landscape analysis failed",
+                    "opportunity": "Provide comprehensive coverage based on user context",
+                }
+            ],
+            "existing_content_summary": f"Content analysis failed: {e}",
+            "analyzed_articles": [],
+            "differentiation_requirements": [
+                "Include working code examples",
+                "Focus on practical implementation details",
+            ],
+        }
+
+        # Save checkpoint if job_id exists
+        if job_id:
+            job_manager = JobManager()
+            job_dir = job_manager.get_job_dir(job_id)
+
+            import json
+            strategy_path = job_dir / "content_strategy.json"
+            with open(strategy_path, "w") as f:
+                json.dump(strategy_dict, f, indent=2)
+            logger.info(f"Saved default content strategy to {strategy_path}")
+
+            job_manager.save_state(
+                job_id,
+                {
+                    "current_phase": Phase.PLANNING.value,
+                    "content_strategy": strategy_dict,
+                },
+            )
+
         return {
-            "current_phase": Phase.FAILED.value,
-            "error_message": str(e),
+            "content_strategy": strategy_dict,
+            "current_phase": Phase.PLANNING.value,
             "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
     except Exception as e:
         logger.error(f"Unexpected error in content landscape analysis: {e}")
+        logger.warning("Creating default content strategy to allow pipeline to continue")
+
+        # Create minimal default strategy instead of failing
+        strategy_dict = {
+            "unique_angle": "Practical technical guide with concrete examples",
+            "target_persona": "senior_engineer",
+            "reader_problem": f"Understanding and implementing {title}",
+            "gaps_to_fill": [
+                {
+                    "gap_type": "insufficient_depth",
+                    "description": "Landscape analysis encountered an error",
+                    "opportunity": "Provide comprehensive coverage based on user context",
+                }
+            ],
+            "existing_content_summary": f"Content analysis failed with error: {e}",
+            "analyzed_articles": [],
+            "differentiation_requirements": [
+                "Include working code examples",
+                "Focus on practical implementation details",
+            ],
+        }
+
+        # Save checkpoint if job_id exists
+        if job_id:
+            job_manager = JobManager()
+            job_dir = job_manager.get_job_dir(job_id)
+
+            import json
+            strategy_path = job_dir / "content_strategy.json"
+            with open(strategy_path, "w") as f:
+                json.dump(strategy_dict, f, indent=2)
+            logger.info(f"Saved default content strategy to {strategy_path}")
+
+            job_manager.save_state(
+                job_id,
+                {
+                    "current_phase": Phase.PLANNING.value,
+                    "content_strategy": strategy_dict,
+                },
+            )
+
         return {
-            "current_phase": Phase.FAILED.value,
-            "error_message": f"Unexpected error: {e}",
+            "content_strategy": strategy_dict,
+            "current_phase": Phase.PLANNING.value,
             "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
@@ -1276,11 +1401,14 @@ For each section, provide:
 - needs_code (true for ALL implementation/deep_dive sections)
 - needs_diagram (true if architecture/flow explanation needed)
 - target_words (distribute {target_words} total across REQUIRED sections only)
-- optional (true for 2 extra sections user can choose from)
+- optional (true for extra sections user can choose from)
 
 ## Required vs Optional Sections
-- hook, problem/why, conclusion: ALWAYS set optional=false
-- implementation/deep_dive sections: Generate 4-6 total, mark 2 as optional=true
+- hook, problem/why, conclusion: ALWAYS set optional=false (3-4 sections)
+- Core implementation: ALWAYS set optional=false (1 section showing primary approach)
+- Deep dives/comparisons: Generate 7-10 total, ALL marked optional=true
+  - Each should be self-contained and address a unique angle
+  - Examples: "Redis vs Alternatives", "Production Pitfalls", "Benchmarking", "Advanced Patterns", "Edge Cases"
 - tradeoffs section: optional=false if topic has significant drawbacks
 
 {gap_mapping_section}
@@ -1299,7 +1427,17 @@ The following snippets provide current context about this topic:
 Use this research to inform your subtopic selection.
 Focus on aspects that appear important based on this context.
 
-Generate a blog plan with 7-8 sections total (including 2 optional deep_dive sections).
+Generate a blog plan with 10-15 sections total:
+- 3-5 REQUIRED sections (hook, problem/why, core implementation, conclusion): optional=false
+- 7-10 OPTIONAL sections (deep dives, comparisons, edge cases, production concerns): optional=true
+
+User will select 2-4 optional sections to include (final blog will have 5-7 sections).
+
+For optional sections:
+- Each should address a distinct aspect or technique
+- Include variety: comparisons, benchmarks, production pitfalls, advanced patterns, edge cases
+- Provide strong gap_justification so user understands value
+
 Ensure target_words for required sections sum to approximately {target_words}.
 Output as structured BlogPlan."""
 
@@ -2500,7 +2638,7 @@ async def preview_validation_node(state: BlogAgentState) -> dict[str, Any]:
             )
 
             return {
-                "current_phase": Phase.RESEARCHING.value,
+                "current_phase": Phase.SECTION_SELECTION.value,
                 "preview_validation_result": validation_result.model_dump(),
                 "uniqueness_checks": [c.model_dump() for c in uniqueness_checks],
                 "preview_validation_scratchpad": scratchpad,
@@ -2582,6 +2720,222 @@ async def preview_validation_node(state: BlogAgentState) -> dict[str, Any]:
             "error_message": f"Preview validation error: {e}",
             "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
+
+
+# =============================================================================
+# Section Selection Node (Phase 1.6)
+# =============================================================================
+
+
+def _parse_selection_input(selection: str, max_index: int) -> list[int]:
+    """
+    Parse user selection input into list of indices.
+
+    Supports:
+    - "1,3,5" → [1, 3, 5]
+    - "1-4" → [1, 2, 3, 4]
+    - "1,3-5,7" → [1, 3, 4, 5, 7]
+
+    Args:
+        selection: User input string
+        max_index: Maximum valid index
+
+    Returns:
+        List of selected indices (1-based)
+
+    Raises:
+        ValueError: If input is invalid
+    """
+    indices = set()
+
+    for part in selection.split(","):
+        part = part.strip()
+
+        if "-" in part:
+            # Range: "1-4"
+            try:
+                start, end = part.split("-")
+                start, end = int(start.strip()), int(end.strip())
+                if start < 1 or end > max_index or start > end:
+                    raise ValueError(f"Invalid range: {part}")
+                indices.update(range(start, end + 1))
+            except (ValueError, AttributeError) as e:
+                raise ValueError(f"Invalid range format: {part}")
+        else:
+            # Single number
+            try:
+                num = int(part)
+                if num < 1 or num > max_index:
+                    raise ValueError(f"Number out of range: {num}")
+                indices.add(num)
+            except ValueError:
+                raise ValueError(f"Invalid number: {part}")
+
+    return sorted(list(indices))
+
+
+async def section_selection_node(state: BlogAgentState) -> dict[str, Any]:
+    """
+    Present optional blog sections to user for selection.
+
+    User selects which optional sections to include in the final blog.
+    Required sections are always included automatically.
+
+    Args:
+        state: BlogAgentState with completed plan
+
+    Returns:
+        State update with selected_section_ids
+    """
+    from rich.console import Console
+    from rich.table import Table
+    from rich.prompt import Prompt, Confirm
+
+    start_time = time.time()
+    node_name = "section_selection"
+    metrics = state.get("metrics", [])
+
+    console = Console()
+    plan = state.get("plan", {})
+    sections = plan.get("sections", [])
+
+    # Separate required and optional
+    required = [s for s in sections if not s.get("optional", False)]
+    optional = [s for s in sections if s.get("optional", False)]
+
+    # Edge case: no optional sections
+    if not optional:
+        console.print("[yellow]No optional sections to select. Proceeding with all required sections.[/yellow]")
+        return {
+            "selected_section_ids": [s["id"] for s in required],
+            "section_selection_skipped": True,
+            "current_phase": Phase.RESEARCHING.value,
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
+        }
+
+    # Display header
+    console.print("\n[bold blue]📋 Section Selection[/bold blue]")
+    console.print(f"Total sections generated: {len(sections)}")
+    console.print(f"Required sections: {len(required)} (always included)")
+    console.print(f"Optional sections: {len(optional)} (select 2-4)\n")
+
+    # Show required sections (auto-included)
+    console.print("[bold green]✓ Required Sections (always included):[/bold green]")
+    for i, sec in enumerate(required, 1):
+        console.print(f"  {i}. [bold]{sec.get('title', sec['id'])}[/bold] ({sec['role']}, ~{sec['target_words']}w)")
+
+    # Show optional sections in table
+    console.print(f"\n[bold yellow]Optional Sections (select 2-4):[/bold yellow]")
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("#", style="cyan", width=3)
+    table.add_column("Title", style="white", width=30)
+    table.add_column("Role", style="green", width=15)
+    table.add_column("Gap Addressed", style="yellow", width=18)
+    table.add_column("Words", style="magenta", width=6)
+    table.add_column("Code", style="blue", width=4)
+    table.add_column("Why Include?", style="white", width=50)
+
+    for i, sec in enumerate(optional, 1):
+        justification = sec.get("gap_justification", "No justification provided")
+        truncated = justification[:47] + "..." if len(justification) > 50 else justification
+        table.add_row(
+            str(i),
+            sec.get("title", sec["id"])[:30],
+            sec["role"],
+            sec.get("gap_addressed", "N/A"),
+            str(sec["target_words"]),
+            "✓" if sec.get("needs_code") else "-",
+            truncated
+        )
+
+    console.print(table)
+
+    # Get user input
+    console.print("\n[bold]Selection Options:[/bold]")
+    console.print("  • Enter numbers (e.g., '1,3,5' or '1-4' or '1,3-5')")
+    console.print("  • Press Enter to skip selection (include all sections)")
+    console.print("  • Type 'all' to include all optional sections")
+
+    while True:
+        selection = Prompt.ask(
+            "\nSelect optional sections (2-4 recommended)",
+            default=""
+        )
+
+        # Handle special cases
+        if not selection or selection.lower() == "skip":
+            if Confirm.ask("Skip selection and include all sections?", default=False):
+                selected_ids = [s["id"] for s in sections]
+                skipped = True
+                break
+
+        if selection.lower() == "all":
+            selected_ids = [s["id"] for s in sections]
+            skipped = True
+            console.print("[green]All sections selected.[/green]")
+            break
+
+        # Parse selection
+        try:
+            selected_indices = _parse_selection_input(selection, len(optional))
+
+            # Validate count (recommend 2-4 but allow any)
+            if len(selected_indices) < 1:
+                console.print("[red]Please select at least 1 optional section.[/red]")
+                continue
+
+            if len(selected_indices) > len(optional):
+                console.print(f"[red]Cannot select more than {len(optional)} sections.[/red]")
+                continue
+
+            # Warning for too few/many
+            if len(selected_indices) < 2:
+                if not Confirm.ask(f"Only {len(selected_indices)} section selected. Continue?", default=False):
+                    continue
+            elif len(selected_indices) > 4:
+                if not Confirm.ask(f"{len(selected_indices)} sections selected (blog will be long). Continue?", default=False):
+                    continue
+
+            # Build selected IDs: required + selected optional
+            selected_optional = [optional[i-1] for i in selected_indices]
+            selected_ids = [s["id"] for s in required] + [s["id"] for s in selected_optional]
+            skipped = False
+
+            # Confirmation
+            console.print(f"\n[bold]Final selection ({len(selected_ids)} sections):[/bold]")
+            for s in required + selected_optional:
+                console.print(f"  ✓ {s.get('title', s['id'])}")
+
+            if Confirm.ask("\nProceed with this selection?", default=True):
+                break
+            else:
+                console.print("[yellow]Selection cancelled. Please try again.[/yellow]\n")
+
+        except ValueError as e:
+            console.print(f"[red]Invalid input: {e}[/red]")
+            continue
+
+    console.print(f"\n[green]✓ Selection complete. Proceeding with {len(selected_ids)} sections.[/green]")
+
+    # Save to checkpoint
+    job_manager = JobManager()
+    job_id = state.get("job_id", "")
+    if job_id:
+        selection_file = job_manager.get_job_dir(job_id) / "selected_sections.json"
+        with open(selection_file, "w") as f:
+            json.dump({
+                "selected_section_ids": selected_ids,
+                "selection_skipped": skipped,
+                "timestamp": datetime.utcnow().isoformat(),
+            }, f, indent=2)
+
+    return {
+        "selected_section_ids": selected_ids,
+        "section_selection_skipped": skipped,
+        "current_phase": Phase.RESEARCHING.value,
+        "metrics": _finalize_node_metrics(metrics, node_name, start_time),
+    }
 
 
 # =============================================================================
@@ -4089,8 +4443,14 @@ async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
     job_id = state.get("job_id", "")
     blog_title = plan.get("blog_title", state.get("title", ""))
 
-    # Filter to required (non-optional) sections
-    required_sections = [s for s in sections if not s.get("optional")]
+    # Filter to selected sections (or fallback to required only)
+    selected_ids = state.get("selected_section_ids", [])
+    if selected_ids:
+        # Use user selection
+        required_sections = [s for s in sections if s["id"] in selected_ids]
+    else:
+        # Fallback: filter out optional (backward compatibility)
+        required_sections = [s for s in sections if not s.get("optional")]
 
     if current_idx >= len(required_sections):
         logger.info("All sections written, moving to assembly")
@@ -4745,6 +5105,7 @@ def _combine_sections(
     section_drafts: dict[str, str],
     plan: dict,
     blog_title: str,
+    selected_section_ids: list[str] | None = None,
 ) -> str:
     """
     Combine all section drafts into a single markdown document.
@@ -4753,14 +5114,20 @@ def _combine_sections(
         section_drafts: Dict of section_id -> markdown content
         plan: Blog plan with sections list
         blog_title: Title of the blog post
+        selected_section_ids: Optional list of section IDs to include (from user selection)
 
     Returns:
         Combined markdown with H1 title and H2 section headers
     """
     sections = plan.get("sections", [])
 
-    # Filter to required (non-optional) sections in order
-    required_sections = [s for s in sections if not s.get("optional")]
+    # Filter to selected sections (or fallback to required only)
+    if selected_section_ids:
+        # Use user selection, preserve order from plan
+        required_sections = [s for s in sections if s["id"] in selected_section_ids]
+    else:
+        # Fallback: filter out optional (backward compatibility)
+        required_sections = [s for s in sections if not s.get("optional")]
 
     combined_parts = []
 
@@ -4917,6 +5284,7 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
     section_drafts = state.get("section_drafts", {})
     job_id = state.get("job_id", "")
     blog_title = plan.get("blog_title", state.get("title", "Untitled"))
+    selected_section_ids = state.get("selected_section_ids", [])
 
     # Initialize scratchpad
     scratchpad = state.get("final_assembly_scratchpad", [])
@@ -4940,6 +5308,7 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
             section_drafts=section_drafts,
             plan=plan,
             blog_title=blog_title,
+            selected_section_ids=selected_section_ids if selected_section_ids else None,
         )
 
         logger.info(f"Combined draft: {_count_words(combined_draft)} words")

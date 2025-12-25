@@ -35,6 +35,8 @@ class TestPhaseEnum:
             "topic_discovery",
             "content_landscape",
             "planning",
+            "preview_validation",
+            "section_selection",
             "researching",
             "validating_sources",
             "writing",

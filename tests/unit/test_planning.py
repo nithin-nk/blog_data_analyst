@@ -283,7 +283,7 @@ class TestPlanningNode:
                     result = await planning_node(sample_state)
 
                     assert "plan" in result
-                    assert result["current_phase"] == Phase.RESEARCHING.value
+                    assert result["current_phase"] == Phase.PREVIEW_VALIDATION.value
                     assert len(result["plan"]["sections"]) == 8  # 6 required + 2 optional
 
     @pytest.mark.asyncio
@@ -345,13 +345,13 @@ class TestPlanningNode:
 
                 await planning_node(state)
 
-                # Should be called with target_words=1500 (medium)
+                # Should be called with target_words=1000 (medium)
                 call_args = mock_gen.call_args
-                assert call_args.kwargs.get("target_words") == 1500
+                assert call_args.kwargs.get("target_words") == 1000
 
     @pytest.mark.asyncio
     async def test_respects_target_length_short(self, mock_blog_plan):
-        """Uses short (800 words) when specified."""
+        """Uses short (500 words) when specified."""
         state: BlogAgentState = {
             "title": "Test Title",
             "context": "Test context",
@@ -366,11 +366,11 @@ class TestPlanningNode:
                 await planning_node(state)
 
                 call_args = mock_gen.call_args
-                assert call_args.kwargs.get("target_words") == 800
+                assert call_args.kwargs.get("target_words") == 500
 
     @pytest.mark.asyncio
     async def test_respects_target_length_long(self, mock_blog_plan):
-        """Uses long (2500 words) when specified."""
+        """Uses long (1500 words) when specified."""
         state: BlogAgentState = {
             "title": "Test Title",
             "context": "Test context",
@@ -385,7 +385,7 @@ class TestPlanningNode:
                 await planning_node(state)
 
                 call_args = mock_gen.call_args
-                assert call_args.kwargs.get("target_words") == 2500
+                assert call_args.kwargs.get("target_words") == 1500
 
     @pytest.mark.asyncio
     async def test_handles_empty_topic_context(self, mock_blog_plan):
@@ -403,7 +403,7 @@ class TestPlanningNode:
 
                 result = await planning_node(state)
 
-                assert result["current_phase"] == Phase.RESEARCHING.value
+                assert result["current_phase"] == Phase.PREVIEW_VALIDATION.value
                 assert "plan" in result
 
     @pytest.mark.asyncio

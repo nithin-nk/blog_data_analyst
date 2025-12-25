@@ -7,8 +7,8 @@ This module defines the blog agent graph with:
 
 Graph structure:
     topic_discovery → content_landscape_analysis → planning → preview_validation →
-    (conditional: pass → research OR fail → planning) → research → validate_sources →
-    write_section ↓ (loop) → final_assembly → human_review → END
+    (conditional: pass → section_selection OR fail → planning) → section_selection → research →
+    validate_sources → write_section ↓ (loop) → final_assembly → human_review → END
 """
 
 from langgraph.graph import END, StateGraph
@@ -20,6 +20,7 @@ from .nodes import (
     planning_node,
     preview_validation_node,
     research_node,
+    section_selection_node,
     topic_discovery_node,
     validate_sources_node,
     write_section_node,
@@ -33,7 +34,7 @@ def preview_validation_router(state: BlogAgentState) -> str:
 
     Returns:
         "planning" if validation failed (trigger replanning)
-        "research" if validation passed (proceed to research)
+        "section_selection" if validation passed (proceed to section selection)
     """
     current_phase = state.get("current_phase", "")
 
@@ -41,12 +42,12 @@ def preview_validation_router(state: BlogAgentState) -> str:
     if current_phase == Phase.PLANNING.value:
         return "planning"
 
-    # If phase advanced to RESEARCHING, validation passed
-    if current_phase == Phase.RESEARCHING.value:
-        return "research"
+    # If phase advanced to SECTION_SELECTION, validation passed
+    if current_phase == Phase.SECTION_SELECTION.value:
+        return "section_selection"
 
-    # Default: proceed to research (shouldn't happen but safe fallback)
-    return "research"
+    # Default: proceed to section selection (shouldn't happen but safe fallback)
+    return "section_selection"
 
 
 def section_router(state: BlogAgentState) -> str:
@@ -60,8 +61,14 @@ def section_router(state: BlogAgentState) -> str:
     sections = plan.get("sections", [])
     current_idx = state.get("current_section_index", 0)
 
-    # Only count non-optional sections
-    required_sections = [s for s in sections if not s.get("optional")]
+    # Filter to selected sections (or fallback to required only)
+    selected_ids = state.get("selected_section_ids", [])
+    if selected_ids:
+        # Use user selection
+        required_sections = [s for s in sections if s["id"] in selected_ids]
+    else:
+        # Fallback: filter out optional (backward compatibility)
+        required_sections = [s for s in sections if not s.get("optional")]
 
     if current_idx < len(required_sections):
         return "write_next"
@@ -82,12 +89,12 @@ def review_router(state: BlogAgentState) -> str:
 
 def build_blog_agent_graph() -> StateGraph:
     """
-    Build the blog agent graph with preview validation, section loop, and human review.
+    Build the blog agent graph with preview validation, section selection, section loop, and human review.
 
     Graph structure:
         topic_discovery → content_landscape_analysis → planning → preview_validation →
-        (conditional: pass → research OR fail → planning) → research → validate_sources →
-        write_section ↓ (loop) → final_assembly → human_review → END
+        (conditional: pass → section_selection OR fail → planning) → section_selection → research →
+        validate_sources → write_section ↓ (loop) → final_assembly → human_review → END
 
     Returns:
         Compiled LangGraph StateGraph
@@ -100,6 +107,7 @@ def build_blog_agent_graph() -> StateGraph:
     graph.add_node("content_landscape_analysis", content_landscape_analysis_node)
     graph.add_node("planning", planning_node)
     graph.add_node("preview_validation", preview_validation_node)
+    graph.add_node("section_selection", section_selection_node)
     graph.add_node("research", research_node)
     graph.add_node("validate_sources", validate_sources_node)
     graph.add_node("write_section", write_section_node)
@@ -120,11 +128,14 @@ def build_blog_agent_graph() -> StateGraph:
         preview_validation_router,
         {
             "planning": "planning",  # Failed validation → replan
-            "research": "research",  # Passed validation → proceed
+            "section_selection": "section_selection",  # Passed validation → section selection
         },
     )
 
-    # Continue pipeline after validation passes
+    # Section selection → research
+    graph.add_edge("section_selection", "research")
+
+    # Continue pipeline after section selection
     graph.add_edge("research", "validate_sources")
     graph.add_edge("validate_sources", "write_section")
 

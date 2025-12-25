@@ -29,14 +29,15 @@ class Phase(str, Enum):
 
     State flow:
     topic_discovery → content_landscape → planning → preview_validation →
-    researching → validating_sources → writing → reviewing → assembling →
-    final_review → done | failed
+    section_selection → researching → validating_sources → writing → reviewing →
+    assembling → final_review → done | failed
     """
 
     TOPIC_DISCOVERY = "topic_discovery"
     CONTENT_LANDSCAPE = "content_landscape"
     PLANNING = "planning"
     PREVIEW_VALIDATION = "preview_validation"
+    SECTION_SELECTION = "section_selection"
     RESEARCHING = "researching"
     VALIDATING_SOURCES = "validating_sources"
     WRITING = "writing"
@@ -53,6 +54,7 @@ PHASE_ORDER = [
     Phase.CONTENT_LANDSCAPE,
     Phase.PLANNING,
     Phase.PREVIEW_VALIDATION,
+    Phase.SECTION_SELECTION,
     Phase.RESEARCHING,
     Phase.VALIDATING_SOURCES,
     Phase.WRITING,
@@ -130,6 +132,10 @@ class BlogAgentState(TypedDict, total=False):
     uniqueness_checks: list[dict[str, Any]]  # UniquenessCheck results
     replanning_feedback: str  # Feedback for replanning
     preview_validation_scratchpad: list[dict[str, Any]]  # Full iteration history with validation results and feedback
+
+    # === Phase 1.6: Section Selection ===
+    selected_section_ids: list[str]  # IDs of sections user chose to include
+    section_selection_skipped: bool  # True if user skipped selection (include all)
 
     # === Phase 2: Research ===
     research_cache: dict[str, dict[str, Any]]  # url_hash -> content
