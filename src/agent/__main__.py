@@ -185,24 +185,38 @@ async def _run_start(title: str, context: str, length: str):
     console.print(f"[dim]Title:[/dim] {title}")
     console.print(f"[dim]Length:[/dim] {length}\n")
 
-    # Create job
+    # Create or resume job
     job_manager = JobManager()
-    job_id = job_manager.create_job(title, context, length)
+    job_id = job_manager.slugify(title)
 
-    console.print(f"[dim]Job ID: {job_id}[/dim]")
-    console.print("")
+    # Check if job already exists
+    existing_state = job_manager.load_state(job_id)
 
-    # Create initial state
-    initial_state = {
-        "job_id": job_id,
-        "title": title,
-        "context": context,
-        "target_length": length,
-        "current_phase": Phase.TOPIC_DISCOVERY.value,
-        "current_section_index": 0,
-        "section_drafts": {},
-        "flags": {},
-    }
+    if existing_state and existing_state.get("current_phase") not in [Phase.DONE.value, Phase.FAILED.value]:
+        # Job exists and is incomplete - resume it
+        console.print(f"[dim]Job ID: {job_id}[/dim]")
+        console.print(f"[yellow]⚠️  Job already exists. Resuming from {existing_state.get('current_phase')}...[/yellow]\n")
+        initial_state = existing_state
+        # Add key manager (can't be serialized, so recreate on load)
+        initial_state["key_manager"] = KeyManager.from_env()
+    else:
+        # Create new job (fresh or overwriting completed/failed job)
+        job_id = job_manager.create_job(title, context, length)
+        console.print(f"[dim]Job ID: {job_id}[/dim]")
+        console.print("")
+
+        # Create initial state
+        initial_state = {
+            "job_id": job_id,
+            "title": title,
+            "context": context,
+            "target_length": length,
+            "current_phase": Phase.TOPIC_DISCOVERY.value,
+            "current_section_index": 0,
+            "section_drafts": {},
+            "flags": {},
+            "key_manager": KeyManager.from_env(),
+        }
 
     try:
         # Build graph
@@ -313,6 +327,9 @@ async def _run_resume(job_id: str):
     if state is None:
         console.print(f"[bold red]❌ Job not found:[/bold red] {job_id}")
         sys.exit(1)
+
+    # Add key manager (can't be serialized, so recreate on load)
+    state["key_manager"] = KeyManager.from_env()
 
     current_phase = state.get("current_phase", "")
     console.print(f"\n[bold blue]🔄 Resuming Job[/bold blue]")

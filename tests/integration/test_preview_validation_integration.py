@@ -201,6 +201,11 @@ class TestPreviewValidationIntegration:
             # Verify LLM was called for uniqueness check
             assert mock_llm_class.called
 
+            # Verify scratchpad was created
+            assert "preview_validation_scratchpad" in result
+            assert len(result["preview_validation_scratchpad"]) == 1
+            assert result["preview_validation_scratchpad"][0]["passed"] is True
+
     @pytest.mark.asyncio
     async def test_validation_fails_with_weak_sections(self, realistic_state_failing):
         """Test validation fails when sections have poor information availability."""
@@ -278,6 +283,12 @@ class TestPreviewValidationIntegration:
 
             # Verify both LLM instances were created
             assert mock_llm_class.call_count == 2
+
+            # Verify scratchpad was created with failure
+            assert "preview_validation_scratchpad" in result
+            assert len(result["preview_validation_scratchpad"]) == 1
+            assert result["preview_validation_scratchpad"][0]["passed"] is False
+            assert len(result["preview_validation_scratchpad"][0]["rejected_section_ids"]) > 0
 
     @pytest.mark.asyncio
     async def test_validation_max_iterations_reached(self, realistic_state_failing):

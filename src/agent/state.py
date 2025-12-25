@@ -106,6 +106,9 @@ class BlogAgentState(TypedDict, total=False):
     target_length: str  # "short" | "medium" | "long"
     flags: dict[str, bool]  # review_sections, review_final, no_citations, etc.
 
+    # === Runtime (not serialized) ===
+    key_manager: Any  # KeyManager instance for API key rotation (runtime only, not saved to disk)
+
     # === Phase Tracking ===
     current_phase: str  # Phase enum value
     current_section_index: int
@@ -126,6 +129,7 @@ class BlogAgentState(TypedDict, total=False):
     rejected_sections: list[dict[str, Any]]  # Sections that failed validation
     uniqueness_checks: list[dict[str, Any]]  # UniquenessCheck results
     replanning_feedback: str  # Feedback for replanning
+    preview_validation_scratchpad: list[dict[str, Any]]  # Full iteration history with validation results and feedback
 
     # === Phase 2: Research ===
     research_cache: dict[str, dict[str, Any]]  # url_hash -> content
@@ -142,6 +146,7 @@ class BlogAgentState(TypedDict, total=False):
     combined_draft: str
     final_review: dict[str, Any]
     rendered_diagrams: dict[str, str]  # diagram_id -> path
+    final_assembly_scratchpad: list[dict[str, Any]]  # Assembly iteration history with critic scores and fixes
 
     # === Phase 5: Human Review ===
     human_review_decision: str  # "approve" | "edit" | "reject"
@@ -672,6 +677,10 @@ class JobManager:
             tc = self._load_json(job_dir / "topic_context.json")
             state["discovery_queries"] = tc.get("queries_used", [])
             state["topic_context"] = tc.get("results", [])
+
+        # Load content strategy
+        if (job_dir / "content_strategy.json").exists():
+            state["content_strategy"] = self._load_json(job_dir / "content_strategy.json")
 
         # Load plan
         if (job_dir / "plan.json").exists():

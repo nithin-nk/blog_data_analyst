@@ -58,6 +58,23 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# Helper Functions
+# =============================================================================
+
+
+def _preserve_key_manager(state: BlogAgentState) -> dict:
+    """
+    Return dict preserving key_manager from state.
+
+    Used when nodes skip to ensure key_manager persists through state merges.
+    LangGraph merges returned dicts into state, so non-serializable objects like
+    key_manager must be explicitly passed through.
+    """
+    km = state.get("key_manager")
+    return {"key_manager": km} if km else {}
+
+
+# =============================================================================
 # Metrics Tracking Helpers
 # =============================================================================
 
@@ -238,7 +255,7 @@ async def topic_discovery_node(state: BlogAgentState) -> dict[str, Any]:
     # Skip if phase already past this node (resumption)
     if phase_is_past(state.get("current_phase", ""), Phase.TOPIC_DISCOVERY):
         logger.info("Skipping topic_discovery_node - phase already past")
-        return {}
+        return _preserve_key_manager(state)
 
     node_name = "topic_discovery"
     metrics, start_time = _init_node_metrics(state, node_name)
@@ -775,7 +792,7 @@ async def content_landscape_analysis_node(state: BlogAgentState) -> dict[str, An
     # Skip if phase already past this node (resumption)
     if phase_is_past(state.get("current_phase", ""), Phase.CONTENT_LANDSCAPE):
         logger.info("Skipping content_landscape_analysis_node - phase already past")
-        return {}
+        return _preserve_key_manager(state)
 
     node_name = "content_landscape"
     metrics, start_time = _init_node_metrics(state, node_name)
@@ -1029,6 +1046,7 @@ def _build_planning_prompt(
     content_strategy: dict | None = None,
     replanning_feedback: str | None = None,
     rejected_sections: list[dict[str, Any]] | None = None,
+    scratchpad: list[dict[str, Any]] | None = None,
 ) -> str:
     """
     Build the planning prompt for Gemini.
@@ -1041,6 +1059,7 @@ def _build_planning_prompt(
         content_strategy: ContentStrategy dict from landscape analysis (optional)
         replanning_feedback: Feedback from preview validation if replanning
         rejected_sections: Sections that failed validation
+        scratchpad: Planning iteration history to prevent repeating mistakes
 
     Returns:
         Complete prompt string
@@ -1100,6 +1119,60 @@ Your sections MUST NOT overlap >70% with these existing articles. Ensure uniquen
 Sections that duplicate existing content will be REJECTED.
 """
 
+    # Build planning history section from scratchpad
+    planning_history_section = ""
+    if scratchpad and len(scratchpad) > 0:
+        history_entries = []
+        for entry in scratchpad:
+            iteration = entry.get("iteration", 0)
+            plan_snapshot = entry.get("plan_snapshot", {})
+            passed = entry.get("passed", False)
+            rejected_ids = entry.get("rejected_section_ids", [])
+            feedback_text = entry.get("feedback_text", "")
+
+            # Show what sections were tried
+            sections_tried = plan_snapshot.get("sections", [])
+            section_summaries = []
+            for s in sections_tried:
+                section_id = s.get("id", "")
+                title = s.get("title", "")
+                gap = s.get("gap_addressed", "")
+                status = "✓ PASSED" if section_id not in rejected_ids else "✗ REJECTED"
+                section_summaries.append(f"    - [{status}] {section_id}: \"{title}\" (gap: {gap})")
+
+            sections_text = "\n".join(section_summaries) if section_summaries else "    (no sections)"
+
+            # Build entry text
+            if passed:
+                status_text = "✓ PASSED VALIDATION"
+            else:
+                status_text = f"✗ FAILED - Rejected: {', '.join(rejected_ids)}"
+
+            entry_text = f"""
+### Iteration {iteration + 1}: {status_text}
+**Sections Attempted:**
+{sections_text}
+
+**What Went Wrong:**
+{feedback_text if feedback_text else "(validation passed)"}
+"""
+            history_entries.append(entry_text)
+
+        planning_history_section = f"""
+## PLANNING ITERATION HISTORY
+
+You have made {len(scratchpad)} previous attempt(s) at planning this blog. Learn from past failures:
+
+{''.join(history_entries)}
+
+**CRITICAL INSTRUCTION:**
+- DO NOT repeat the same mistakes from previous iterations
+- If a section was rejected for low information availability, do NOT propose similar obscure topics
+- If a section had high overlap, do NOT propose the same angle again
+- If gap mapping failed, ensure ALL sections map to valid gaps this time
+- Review the feedback carefully and address ALL issues raised
+"""
+
     # Build replanning section if this is a replanning iteration
     replanning_section = ""
     if replanning_feedback:
@@ -1114,7 +1187,7 @@ Your previous plan failed validation. Issues found:
 {replanning_feedback}
 
 **Instructions for replanning:**
-1. Review the feedback above carefully
+1. Review the iteration history above to avoid repeating mistakes
 2. Replace or improve the rejected sections
 3. Ensure ALL content gaps are properly addressed
 4. Verify new sections have strong information availability
@@ -1212,6 +1285,7 @@ For each section, provide:
 
 {gap_mapping_section}
 {uniqueness_section}
+{planning_history_section}
 {replanning_section}
 
 ## Blog Topic
@@ -1239,6 +1313,7 @@ async def _generate_blog_plan(
     content_strategy: dict | None = None,
     replanning_feedback: str | None = None,
     rejected_sections: list[dict[str, Any]] | None = None,
+    scratchpad: list[dict[str, Any]] | None = None,
     max_retries: int = 3,
 ) -> BlogPlan:
     """
@@ -1253,6 +1328,7 @@ async def _generate_blog_plan(
         content_strategy: ContentStrategy dict from landscape analysis (optional)
         replanning_feedback: Feedback from preview validation if replanning
         rejected_sections: Sections that failed validation
+        scratchpad: Planning iteration history to prevent repeating mistakes
         max_retries: Maximum retry attempts
 
     Returns:
@@ -1267,7 +1343,7 @@ async def _generate_blog_plan(
     # Build prompt with content strategy and replanning context
     prompt = _build_planning_prompt(
         title, context, target_words, topic_snippets, content_strategy,
-        replanning_feedback, rejected_sections
+        replanning_feedback, rejected_sections, scratchpad
     )
 
     last_error = None
@@ -1351,7 +1427,7 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
     # Skip if phase already past this node (resumption)
     if phase_is_past(state.get("current_phase", ""), Phase.PLANNING):
         logger.info("Skipping planning_node - phase already past")
-        return {}
+        return _preserve_key_manager(state)
 
     node_name = "planning"
     metrics, start_time = _init_node_metrics(state, node_name)
@@ -1360,6 +1436,7 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
     iteration = state.get("planning_iteration", 0)
     replanning_feedback = state.get("replanning_feedback", "")
     rejected_sections = state.get("rejected_sections", [])
+    preview_validation_scratchpad = state.get("preview_validation_scratchpad", [])
 
     if iteration > 0:
         logger.info(f"Replanning (iteration {iteration + 1}/3) for: {state.get('title')}")
@@ -1373,16 +1450,12 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
     content_strategy = state.get("content_strategy")
     job_id = state.get("job_id", "")
 
-    # CRITICAL: Content strategy is now REQUIRED
+    # Content strategy is recommended but not strictly required
     if not content_strategy:
-        logger.error("Content strategy required - landscape analysis must run first")
-        return {
-            "current_phase": Phase.FAILED.value,
-            "error_message": "Content strategy required. Landscape analysis must run first.",
-            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
-        }
-
-    logger.info(f"Using content strategy: unique_angle='{content_strategy.get('unique_angle')}'")
+        logger.warning("Content strategy not available - planning without gap mapping")
+        logger.warning("Landscape analysis may have been skipped due to API quota or missing topic context")
+    else:
+        logger.info(f"Using content strategy: unique_angle='{content_strategy.get('unique_angle')}'")
 
     # Validate required inputs
     if not title:
@@ -1409,6 +1482,7 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
             content_strategy=content_strategy,
             replanning_feedback=replanning_feedback if replanning_feedback else None,
             rejected_sections=rejected_sections if rejected_sections else None,
+            scratchpad=preview_validation_scratchpad if preview_validation_scratchpad else None,
         )
 
         # Record LLM call metrics (estimate: ~1500 tokens in, 500 out for plan)
@@ -1977,7 +2051,7 @@ async def _generate_replanning_feedback_llm(
     last_error = None
     for attempt in range(max_retries):
         try:
-            api_key = key_manager.get_key()
+            api_key = key_manager.get_best_key()
 
             llm = ChatGoogleGenerativeAI(
                 model="gemini-2.5-flash",
@@ -1993,7 +2067,7 @@ async def _generate_replanning_feedback_llm(
             result = await structured_llm.ainvoke(prompt)
 
             # Track usage
-            key_manager.track_usage(api_key, input_tokens=len(prompt) // 4, output_tokens=500)
+            key_manager.record_usage(api_key, tokens_in=len(prompt) // 4, tokens_out=500)
 
             logger.info(f"✓ Generated feedback with {len(result.section_suggestions)} suggestions")
             return result
@@ -2079,6 +2153,8 @@ async def _trigger_replanning(
     gap_validation: dict[str, Any] | None = None,
     weak_sections: list[SectionFeasibilityScore] | None = None,
     non_unique_sections: list[UniquenessCheck] | None = None,
+    scratchpad: list[dict[str, Any]] | None = None,
+    job_id: str = "",
 ) -> dict[str, Any]:
     """
     Trigger replanning by returning to PLANNING phase with LLM-generated feedback.
@@ -2092,10 +2168,14 @@ async def _trigger_replanning(
         gap_validation: Gap validation results
         weak_sections: Weak sections
         non_unique_sections: Non-unique sections
+        scratchpad: Planning iteration scratchpad (will be updated with feedback)
+        job_id: Job ID for disk persistence
 
     Returns:
         State update dict to trigger replanning
     """
+    if scratchpad is None:
+        scratchpad = []
     # Generate concrete feedback using LLM
     try:
         feedback_obj = await _generate_replanning_feedback_llm(
@@ -2132,10 +2212,35 @@ async def _trigger_replanning(
 
         feedback = "\n".join(feedback_parts)
 
+        # Update scratchpad entry with LLM feedback
+        if scratchpad:
+            scratchpad[-1]["llm_feedback"] = {
+                "summary": feedback_obj.summary,
+                "section_suggestions": [
+                    {
+                        "section_id": s.section_id,
+                        "issue": s.issue,
+                        "suggested_title": s.suggested_title,
+                        "suggested_angle": s.suggested_angle,
+                    }
+                    for s in feedback_obj.section_suggestions
+                ],
+                "general_guidance": feedback_obj.general_guidance,
+            }
+            scratchpad[-1]["feedback_text"] = feedback
+
     except Exception as e:
         logger.error(f"LLM feedback generation failed: {e}. Falling back to static feedback.")
         # Fallback to static method if LLM fails
         feedback = _build_replanning_feedback(gap_validation, weak_sections, non_unique_sections)
+
+        # Update scratchpad with static feedback
+        if scratchpad:
+            scratchpad[-1]["feedback_text"] = feedback
+            scratchpad[-1]["llm_feedback"] = None
+
+    # Save scratchpad to disk
+    _save_planning_scratchpad(job_id, scratchpad)
 
     rejected_section_ids = []
     if weak_sections:
@@ -2148,7 +2253,119 @@ async def _trigger_replanning(
         "planning_iteration": iteration + 1,
         "replanning_feedback": feedback,
         "rejected_sections": [{"id": sid, "reason": reason} for sid in rejected_section_ids],
+        "preview_validation_scratchpad": scratchpad,
     }
+
+
+def _save_planning_scratchpad(job_id: str, scratchpad: list[dict[str, Any]]) -> None:
+    """Save planning scratchpad to disk."""
+    if not job_id:
+        return
+
+    from pathlib import Path
+    import json
+
+    job_dir = Path.home() / ".blog_agent" / "jobs" / job_id
+    scratchpad_dir = job_dir / "planning_scratchpad"
+    scratchpad_dir.mkdir(parents=True, exist_ok=True)
+
+    scratchpad_file = scratchpad_dir / "iterations.json"
+    with open(scratchpad_file, "w") as f:
+        json.dump(scratchpad, f, indent=2, default=str)
+
+
+def _load_planning_scratchpad(job_id: str) -> list[dict[str, Any]]:
+    """Load planning scratchpad from disk."""
+    if not job_id:
+        return []
+
+    from pathlib import Path
+    import json
+
+    scratchpad_file = (
+        Path.home() / ".blog_agent" / "jobs" / job_id / "planning_scratchpad" / "iterations.json"
+    )
+
+    if not scratchpad_file.exists():
+        return []
+
+    with open(scratchpad_file) as f:
+        return json.load(f)
+
+
+def _build_planning_scratchpad_entry(
+    iteration: int,
+    plan: dict[str, Any],
+    gap_validation: dict[str, Any] | None,
+    feasibility_scores: list[SectionFeasibilityScore],
+    uniqueness_result: Any,  # UniquenessAnalysisResult
+    passed: bool,
+    rejected_section_ids: list[str],
+    llm_feedback: Any | None = None,  # ReplanningFeedback
+) -> dict[str, Any]:
+    """Build a single scratchpad entry for planning iteration."""
+    from datetime import datetime
+
+    entry = {
+        "iteration": iteration,
+        "timestamp": datetime.utcnow().isoformat(),
+        # Plan snapshot
+        "plan_snapshot": {
+            "topic": plan.get("topic", ""),
+            "sections": [
+                {
+                    "id": s.get("id"),
+                    "title": s.get("title"),
+                    "gap_addressed": s.get("gap_addressed"),
+                }
+                for s in plan.get("sections", [])
+            ],
+        },
+        # Validation results
+        "gap_validation": gap_validation,
+        "feasibility_scores": [
+            {
+                "section_id": fs.section_id,
+                "score": fs.information_availability,
+                "is_feasible": fs.is_feasible,
+                "concerns": fs.concerns,
+            }
+            for fs in feasibility_scores
+        ],
+        "uniqueness_checks": [
+            {
+                "section_id": uc.section_id,
+                "section_title": uc.section_title,
+                "overlap_percentage": uc.overlap_percentage,
+                "is_unique": uc.is_unique,
+                "concerns": uc.concerns,
+            }
+            for uc in uniqueness_result.uniqueness_checks
+        ],
+        # Outcome
+        "passed": passed,
+        "rejected_section_ids": rejected_section_ids,
+        # Feedback (will be added later if fails)
+        "llm_feedback": None,
+        "feedback_text": "",
+    }
+
+    if llm_feedback:
+        entry["llm_feedback"] = {
+            "summary": llm_feedback.summary,
+            "section_suggestions": [
+                {
+                    "section_id": s.section_id,
+                    "issue": s.issue,
+                    "suggested_title": s.suggested_title,
+                    "suggested_angle": s.suggested_angle,
+                }
+                for s in llm_feedback.section_suggestions
+            ],
+            "general_guidance": llm_feedback.general_guidance,
+        }
+
+    return entry
 
 
 async def preview_validation_node(state: BlogAgentState) -> dict[str, Any]:
@@ -2182,6 +2399,12 @@ async def preview_validation_node(state: BlogAgentState) -> dict[str, Any]:
     content_strategy = state.get("content_strategy")
     iteration = state.get("planning_iteration", 0)
     key_manager = state.get("key_manager")
+    job_id = state.get("job_id", "")
+
+    # Initialize scratchpad
+    scratchpad = state.get("preview_validation_scratchpad", [])
+    if not scratchpad:
+        scratchpad = []
 
     if not plan:
         logger.error("No plan found in state")
@@ -2251,6 +2474,22 @@ async def preview_validation_node(state: BlogAgentState) -> dict[str, Any]:
         if len(weak_sections) == 0 and len(non_unique) == 0:
             logger.info("✓ All sections passed preview validation")
 
+            # Build scratchpad entry
+            scratchpad_entry = _build_planning_scratchpad_entry(
+                iteration=iteration,
+                plan=plan,
+                gap_validation=gap_validation,
+                feasibility_scores=feasibility_scores,
+                uniqueness_result=uniqueness_result,
+                passed=True,
+                rejected_section_ids=[],
+                llm_feedback=None,
+            )
+            scratchpad.append(scratchpad_entry)
+
+            # Save scratchpad to disk
+            _save_planning_scratchpad(job_id, scratchpad)
+
             # Convert to dicts for state
             validation_result = PreviewValidationResult(
                 section_scores=feasibility_scores,
@@ -2264,12 +2503,32 @@ async def preview_validation_node(state: BlogAgentState) -> dict[str, Any]:
                 "current_phase": Phase.RESEARCHING.value,
                 "preview_validation_result": validation_result.model_dump(),
                 "uniqueness_checks": [c.model_dump() for c in uniqueness_checks],
+                "preview_validation_scratchpad": scratchpad,
                 "metrics": _finalize_node_metrics(metrics, node_name, start_time),
             }
 
         # Some sections failed - check iteration limit
         if iteration >= 2:
             logger.error(f"Max iterations (3) reached. Cannot create viable plan.")
+
+            # Build final scratchpad entry
+            rejected_section_ids = [s.section_id for s in weak_sections] + [c.section_id for c in non_unique]
+            scratchpad_entry = _build_planning_scratchpad_entry(
+                iteration=iteration,
+                plan=plan,
+                gap_validation=gap_validation,
+                feasibility_scores=feasibility_scores,
+                uniqueness_result=uniqueness_result,
+                passed=False,
+                rejected_section_ids=rejected_section_ids,
+                llm_feedback=None,
+            )
+            scratchpad_entry["failure_reason"] = "max_iterations_reached"
+            scratchpad.append(scratchpad_entry)
+
+            # Save scratchpad to disk
+            _save_planning_scratchpad(job_id, scratchpad)
+
             return {
                 "current_phase": Phase.FAILED.value,
                 "error_message": "Cannot create viable plan after 3 attempts. Please review and manually edit plan.json.",
@@ -2282,11 +2541,27 @@ async def preview_validation_node(state: BlogAgentState) -> dict[str, Any]:
                         None, weak_sections, non_unique
                     ),
                 },
+                "preview_validation_scratchpad": scratchpad,
                 "metrics": _finalize_node_metrics(metrics, node_name, start_time),
             }
 
         # Trigger replanning
         logger.warning(f"Preview validation failed. Triggering replanning (attempt {iteration + 2}/3)")
+
+        # Build scratchpad entry (feedback will be added by _trigger_replanning)
+        rejected_section_ids = [s.section_id for s in weak_sections] + [c.section_id for c in non_unique]
+        scratchpad_entry = _build_planning_scratchpad_entry(
+            iteration=iteration,
+            plan=plan,
+            gap_validation=gap_validation,
+            feasibility_scores=feasibility_scores,
+            uniqueness_result=uniqueness_result,
+            passed=False,
+            rejected_section_ids=rejected_section_ids,
+            llm_feedback=None,  # Will be added by _trigger_replanning
+        )
+        scratchpad.append(scratchpad_entry)
+
         return await _trigger_replanning(
             reason="sections_failed_validation",
             iteration=iteration,
@@ -2295,6 +2570,9 @@ async def preview_validation_node(state: BlogAgentState) -> dict[str, Any]:
             key_manager=key_manager,
             weak_sections=weak_sections,
             non_unique_sections=non_unique,
+            gap_validation=gap_validation,
+            scratchpad=scratchpad,
+            job_id=job_id,
         )
 
     except Exception as e:
@@ -2416,7 +2694,7 @@ async def research_node(state: BlogAgentState) -> dict[str, Any]:
     # Skip if phase already past this node (resumption)
     if phase_is_past(state.get("current_phase", ""), Phase.RESEARCHING):
         logger.info("Skipping research_node - phase already past")
-        return {}
+        return _preserve_key_manager(state)
 
     node_name = "research"
     metrics, start_time = _init_node_metrics(state, node_name)
@@ -2800,7 +3078,7 @@ async def validate_sources_node(state: BlogAgentState) -> dict[str, Any]:
     # Skip if phase already past this node (resumption)
     if phase_is_past(state.get("current_phase", ""), Phase.VALIDATING_SOURCES):
         logger.info("Skipping validate_sources_node - phase already past")
-        return {}
+        return _preserve_key_manager(state)
 
     node_name = "validate_sources"
     metrics, start_time = _init_node_metrics(state, node_name)
@@ -3789,7 +4067,7 @@ async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
     # Skip if phase already past this node (resumption)
     if phase_is_past(state.get("current_phase", ""), Phase.WRITING):
         logger.info("Skipping write_section_node - phase already past")
-        return {}
+        return _preserve_key_manager(state)
 
     node_name = "write_section"
     metrics, start_time = _init_node_metrics(state, node_name)
@@ -4093,6 +4371,7 @@ def _build_final_critic_prompt(
     draft: str,
     plan: dict,
     blog_title: str,
+    scratchpad: list[dict[str, Any]] | None = None,
 ) -> str:
     """
     Build prompt for 7-dimension whole-blog evaluation.
@@ -4112,6 +4391,7 @@ def _build_final_critic_prompt(
         draft: Complete blog markdown
         plan: Blog plan with sections
         blog_title: Title of the blog
+        scratchpad: Assembly iteration history to track improvements
 
     Returns:
         Final critic evaluation prompt
@@ -4124,6 +4404,69 @@ def _build_final_critic_prompt(
 
     # Analyze overall sentence structure metrics for entire blog
     overall_metrics = _analyze_sentence_lengths(draft)
+
+    # Build assembly history section from scratchpad
+    assembly_history_section = ""
+    if scratchpad and len(scratchpad) > 0:
+        history_entries = []
+        for entry in scratchpad:
+            iteration = entry.get("iteration", 0)
+            critic_scores = entry.get("critic_scores", {})
+            overall_score = entry.get("overall_score", 0)
+            passed = entry.get("passed", False)
+            transition_fixes = entry.get("transition_fixes", [])
+            fixes_applied = entry.get("fixes_applied", [])
+            score_changes = entry.get("score_changes", {})
+
+            # Format scores with changes
+            scores_text = []
+            for dim, score in critic_scores.items():
+                change = score_changes.get(dim, 0)
+                change_str = f" ({change:+.1f})" if change != 0 else ""
+                scores_text.append(f"    - {dim}: {score:.1f}{change_str}")
+            scores_str = "\n".join(scores_text) if scores_text else "    (no scores)"
+
+            # Format transition fixes
+            transitions_text = []
+            for fix in transition_fixes:
+                between = fix.get("between", [])
+                issue = fix.get("issue", "")
+                transitions_text.append(f"    - Between {' → '.join(between)}: {issue}")
+            transitions_str = "\n".join(transitions_text) if transitions_text else "    (no transition issues)"
+
+            # Format fixes applied
+            fixes_str = "\n".join(f"    - {fix}" for fix in fixes_applied) if fixes_applied else "    (no fixes applied)"
+
+            # Build entry text
+            status_text = "✓ PASSED" if passed else "✗ NEEDS IMPROVEMENT"
+
+            entry_text = f"""
+### Iteration {iteration + 1}: {status_text} (Overall: {overall_score:.1f}/10)
+**Scores:**
+{scores_str}
+
+**Transition Issues Identified:**
+{transitions_str}
+
+**Fixes Applied:**
+{fixes_str}
+"""
+            history_entries.append(entry_text)
+
+        assembly_history_section = f"""
+## ASSEMBLY ITERATION HISTORY
+
+You have evaluated this blog {len(scratchpad)} time(s) before. Track improvements and avoid regressions:
+
+{''.join(history_entries)}
+
+**CRITICAL INSTRUCTIONS:**
+- DO NOT regress on scores that improved in previous iterations
+- If a dimension improved (positive score change), maintain that improvement
+- If transition fixes were applied, verify they actually improved the flow
+- If a score keeps dropping despite fixes, identify the root cause clearly
+- Focus critique on dimensions that haven't improved yet
+"""
 
     prompt = f"""You are an expert technical blog editor. Evaluate this complete blog post on 7 whole-blog dimensions (1-10 scale).
 
@@ -4144,6 +4487,8 @@ def _build_final_critic_prompt(
 - Longest sentence: {overall_metrics['max_length']} words
 - Sentences > 20 words: {overall_metrics['long_sentences']}
 - Simple sentences (≤15 words): {overall_metrics['percent_simple']:.1f}%
+
+{assembly_history_section}
 
 **Evaluation Criteria (7 Dimensions):**
 
@@ -4199,6 +4544,7 @@ async def _final_critic(
     plan: dict,
     blog_title: str,
     key_manager: KeyManager,
+    scratchpad: list[dict[str, Any]] | None = None,
     max_retries: int = 3,
 ) -> FinalCriticResult:
     """
@@ -4211,12 +4557,13 @@ async def _final_critic(
         plan: Blog plan with sections
         blog_title: Blog title
         key_manager: API key manager
+        scratchpad: Assembly iteration history to track improvements
         max_retries: Max retries on failure
 
     Returns:
         FinalCriticResult with scores and transition fixes
     """
-    prompt = _build_final_critic_prompt(draft, plan, blog_title)
+    prompt = _build_final_critic_prompt(draft, plan, blog_title, scratchpad)
 
     for attempt in range(max_retries):
         try:
@@ -4455,6 +4802,76 @@ def _count_words(text: str) -> int:
     return len(text.split())
 
 
+def _save_assembly_scratchpad(job_id: str, scratchpad: list[dict[str, Any]]) -> None:
+    """Save final assembly scratchpad to disk."""
+    if not job_id:
+        return
+
+    from pathlib import Path
+    import json
+
+    job_dir = Path.home() / ".blog_agent" / "jobs" / job_id
+    scratchpad_dir = job_dir / "assembly_scratchpad"
+    scratchpad_dir.mkdir(parents=True, exist_ok=True)
+
+    scratchpad_file = scratchpad_dir / "iterations.json"
+    with open(scratchpad_file, "w") as f:
+        json.dump(scratchpad, f, indent=2, default=str)
+
+
+def _load_assembly_scratchpad(job_id: str) -> list[dict[str, Any]]:
+    """Load final assembly scratchpad from disk."""
+    if not job_id:
+        return []
+
+    from pathlib import Path
+    import json
+
+    scratchpad_file = (
+        Path.home() / ".blog_agent" / "jobs" / job_id / "assembly_scratchpad" / "iterations.json"
+    )
+
+    if not scratchpad_file.exists():
+        return []
+
+    with open(scratchpad_file) as f:
+        return json.load(f)
+
+
+def _build_assembly_scratchpad_entry(
+    iteration: int,
+    critic_result: Any,  # FinalCriticResult
+    fixes_applied: list[str],
+    prev_scores: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Build scratchpad entry for final assembly iteration."""
+    from datetime import datetime
+
+    # Calculate score changes from previous iteration
+    # Convert FinalCriticScore Pydantic model to dict
+    current_scores = critic_result.scores.model_dump() if hasattr(critic_result.scores, 'model_dump') else critic_result.scores.dict()
+    if prev_scores:
+        score_changes = {
+            dim: current_scores.get(dim, 0) - prev_scores.get(dim, 0)
+            for dim in current_scores.keys()
+        }
+    else:
+        score_changes = {dim: 0 for dim in current_scores.keys()}
+
+    overall_score = sum(current_scores.values()) / len(current_scores) if current_scores else 0
+
+    return {
+        "iteration": iteration,
+        "timestamp": datetime.utcnow().isoformat(),
+        "critic_scores": current_scores,
+        "overall_score": overall_score,
+        "passed": critic_result.overall_pass,
+        "transition_fixes": critic_result.transition_fixes or [],
+        "fixes_applied": fixes_applied,
+        "score_changes": score_changes,
+    }
+
+
 async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
     """
     Phase 4: Final Assembly Node.
@@ -4481,7 +4898,7 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
     # Skip if phase already past this node (resumption)
     if phase_is_past(state.get("current_phase", ""), Phase.ASSEMBLING):
         logger.info("Skipping final_assembly_node - phase already past")
-        return {}
+        return _preserve_key_manager(state)
 
     node_name = "final_assembly"
     metrics, start_time = _init_node_metrics(state, node_name)
@@ -4493,6 +4910,11 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
     section_drafts = state.get("section_drafts", {})
     job_id = state.get("job_id", "")
     blog_title = plan.get("blog_title", state.get("title", "Untitled"))
+
+    # Initialize scratchpad
+    scratchpad = state.get("final_assembly_scratchpad", [])
+    if not scratchpad:
+        scratchpad = []
 
     if not section_drafts:
         logger.error("No section drafts to assemble")
@@ -4527,8 +4949,22 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
                 plan=plan,
                 blog_title=blog_title,
                 key_manager=key_manager,
+                scratchpad=scratchpad,
             )
             critic_calls += 1
+
+            # Build scratchpad entry (fixes_applied will be updated if we apply fixes)
+            prev_scores = scratchpad[-1]["critic_scores"] if scratchpad else None
+            scratchpad_entry = _build_assembly_scratchpad_entry(
+                iteration=iteration,
+                critic_result=critic_result,
+                fixes_applied=[],
+                prev_scores=prev_scores,
+            )
+            scratchpad.append(scratchpad_entry)
+
+            # Save to disk after each iteration
+            _save_assembly_scratchpad(job_id, scratchpad)
 
             if critic_result.overall_pass:
                 logger.info("Final critic passed")
@@ -4543,6 +4979,10 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
                     key_manager=key_manager,
                 )
                 fix_calls += 1
+
+                # Update scratchpad entry with applied fixes
+                scratchpad[-1]["fixes_applied"] = critic_result.transition_fixes
+                _save_assembly_scratchpad(job_id, scratchpad)
 
         # Calculate metadata
         word_count = _count_words(final_draft)
@@ -4624,6 +5064,7 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
             "final_review": final_review,
             "metadata": metadata,
             "current_phase": Phase.REVIEWING.value,
+            "final_assembly_scratchpad": scratchpad,
             "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
@@ -4637,6 +5078,7 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": f"Final assembly failed: {e}",
+            "final_assembly_scratchpad": scratchpad,
             "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
@@ -4655,7 +5097,7 @@ async def human_review_node(state: BlogAgentState) -> dict[str, Any]:
     # Skip if phase already past this node (resumption)
     if phase_is_past(state.get("current_phase", ""), Phase.REVIEWING):
         logger.info("Skipping human_review_node - phase already past")
-        return {}
+        return _preserve_key_manager(state)
 
     node_name = "human_review"
     metrics, start_time = _init_node_metrics(state, node_name)

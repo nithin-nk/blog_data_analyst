@@ -431,6 +431,16 @@ class TestPreviewValidationNode:
                 assert result["current_phase"] == Phase.RESEARCHING.value
                 assert result["preview_validation_result"]["all_sections_pass"] is True
 
+                # Should have scratchpad entry
+                assert "preview_validation_scratchpad" in result
+                assert len(result["preview_validation_scratchpad"]) == 1
+                scratchpad_entry = result["preview_validation_scratchpad"][0]
+                assert scratchpad_entry["iteration"] == 0
+                assert scratchpad_entry["passed"] is True
+                assert "plan_snapshot" in scratchpad_entry
+                assert "feasibility_scores" in scratchpad_entry
+                assert "uniqueness_checks" in scratchpad_entry
+
     @pytest.mark.asyncio
     async def test_preview_validation_trigger_replanning(self, mock_key_manager):
         """Test validation node when sections fail and replanning is triggered."""
@@ -505,6 +515,16 @@ class TestPreviewValidationNode:
                     assert result["current_phase"] == Phase.PLANNING.value
                     assert result["planning_iteration"] == 1
                     assert "replanning_feedback" in result
+
+                    # Should have scratchpad entry with failure
+                    assert "preview_validation_scratchpad" in result
+                    assert len(result["preview_validation_scratchpad"]) == 1
+                    scratchpad_entry = result["preview_validation_scratchpad"][0]
+                    assert scratchpad_entry["iteration"] == 0
+                    assert scratchpad_entry["passed"] is False
+                    assert len(scratchpad_entry["rejected_section_ids"]) == 1
+                    assert "section_1" in scratchpad_entry["rejected_section_ids"]
+                    assert scratchpad_entry["feedback_text"] != ""
 
 
 class TestPreviewValidationRouter:
