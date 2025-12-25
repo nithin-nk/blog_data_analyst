@@ -10,16 +10,20 @@ Usage:
 import asyncio
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.status import Status
+from rich.table import Table
 
 # Load .env file from project root
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
+from .config import GEMINI_PRICING
 from .graph import build_blog_agent_graph
+from .key_manager import KeyManager
 from .state import JobManager, Phase
 
 console = Console()
@@ -42,6 +46,117 @@ def _get_phase_message(phase: str, section_info: str = "") -> str:
     if section_info:
         return f"{icon} {msg} {section_info}"
     return f"{icon} {msg}"
+
+
+def display_metrics_summary(state: dict[str, Any]) -> None:
+    """
+    Display execution metrics summary with Rich table.
+
+    Shows timing, API calls, token usage, and costs per node.
+    Also displays API key usage statistics.
+    """
+    metrics = state.get("metrics", {})
+
+    if not metrics:
+        return
+
+    # Build metrics table
+    table = Table(title="📊 Execution Metrics")
+    table.add_column("Node", style="cyan")
+    table.add_column("Duration", style="green", justify="right")
+    table.add_column("API Calls", style="yellow", justify="right")
+    table.add_column("Tokens (in/out)", style="blue", justify="right")
+    table.add_column("Est. Cost", style="red", justify="right")
+
+    total_cost = 0.0
+    total_tokens_in = 0
+    total_tokens_out = 0
+    total_calls = 0
+    total_duration = 0.0
+
+    # Sort nodes by typical execution order
+    node_order = [
+        "topic_discovery",
+        "content_landscape",
+        "planning",
+        "research",
+        "validate_sources",
+        "write_section",
+        "final_assembly",
+        "human_review",
+    ]
+
+    for node_name in node_order:
+        if node_name not in metrics:
+            continue
+
+        data = metrics[node_name]
+        duration = data.get("duration_s", 0)
+        calls = data.get("calls", 0)
+        tokens_in = data.get("tokens_in", 0)
+        tokens_out = data.get("tokens_out", 0)
+        cost = data.get("cost", 0)
+
+        total_duration += duration
+        total_calls += calls
+        total_tokens_in += tokens_in
+        total_tokens_out += tokens_out
+        total_cost += cost
+
+        # Format display name
+        display_name = node_name.replace("_", " ").title()
+
+        # Format duration
+        if duration >= 60:
+            duration_str = f"{duration / 60:.1f}m"
+        else:
+            duration_str = f"{duration:.1f}s"
+
+        # Format tokens
+        tokens_str = f"{tokens_in:,} / {tokens_out:,}" if tokens_in or tokens_out else "-"
+
+        # Format cost
+        cost_str = f"${cost:.4f}" if cost > 0 else "-"
+
+        # Format calls
+        calls_str = str(calls) if calls > 0 else "-"
+
+        table.add_row(display_name, duration_str, calls_str, tokens_str, cost_str)
+
+    # Add totals row
+    total_duration_str = f"{total_duration / 60:.1f}m" if total_duration >= 60 else f"{total_duration:.1f}s"
+    table.add_row(
+        "[bold]Total[/bold]",
+        f"[bold]{total_duration_str}[/bold]",
+        f"[bold]{total_calls}[/bold]",
+        f"[bold]{total_tokens_in:,} / {total_tokens_out:,}[/bold]",
+        f"[bold]${total_cost:.4f}[/bold]",
+        style="bold",
+    )
+
+    console.print()
+    console.print(table)
+
+    # Display API key usage
+    try:
+        key_manager = KeyManager.from_env()
+        usage_stats = key_manager.get_usage_stats()
+
+        console.print("\n[bold]🔑 API Key Usage:[/bold]")
+        for key_name, stats in usage_stats.get("keys", {}).items():
+            requests = stats.get("requests", 0)
+            remaining = stats.get("remaining", 0)
+            rate_limited = stats.get("rate_limited", False)
+
+            if rate_limited:
+                status = "[red]rate-limited[/red]"
+            else:
+                status = f"[green]{remaining} remaining[/green]"
+
+            console.print(f"  {key_name}: {requests} calls, {status}")
+    except Exception:
+        # Silently skip if key manager fails
+        pass
 
 
 @click.group()
@@ -115,8 +230,12 @@ async def _run_start(title: str, context: str, length: str):
                             icon, _ = PHASE_MESSAGES.get(last_phase, ("✓", ""))
                             console.print(f"  [green]✓[/green] {last_phase.replace('_', ' ').title()} complete")
 
-                        # Update spinner for new phase
-                        status.update(_get_phase_message(current_phase))
+                        # Stop spinner for human review phase (needs interactive input)
+                        if current_phase == Phase.REVIEWING.value:
+                            status.stop()
+                        else:
+                            # Update spinner for new phase
+                            status.update(_get_phase_message(current_phase))
                         last_phase = current_phase
 
                     # Special handling for writing phase - show section progress
@@ -164,6 +283,9 @@ async def _run_start(title: str, context: str, length: str):
             console.print(f"  ⏱️  Reading time: {metadata.get('reading_time_minutes', 'N/A')} min")
             console.print(f"  📑 Sections: {metadata.get('section_count', 'N/A')}")
 
+        # Show execution metrics
+        display_metrics_summary(result)
+
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠️  Interrupted. Job saved for resume.[/yellow]")
         console.print(f"Resume with: [bold]python -m src.agent resume {job_id}[/bold]")
@@ -206,6 +328,25 @@ async def _run_resume(job_id: str):
         state["current_phase"] = Phase.TOPIC_DISCOVERY.value
         state["current_section_index"] = 0
 
+    # Handle REVIEWING phase directly (skip graph, just run human review)
+    if current_phase == Phase.REVIEWING.value:
+        from .nodes import human_review_node
+
+        result = await human_review_node(state)
+        state.update(result)
+
+        if state.get("human_review_decision") == "approve":
+            job_manager.save_state(job_id, {"current_phase": Phase.DONE.value})
+            job_dir = job_manager.get_job_dir(job_id)
+            console.print(f"\n[bold green]✅ Blog finalized![/bold green]")
+            console.print(f"[dim]Output:[/dim] {job_dir / 'final.md'}")
+
+            # Display metrics if available
+            display_metrics_summary(state)
+        else:
+            console.print("\n[yellow]Job cancelled.[/yellow]")
+        return
+
     try:
         # Build graph
         graph = build_blog_agent_graph()
@@ -230,7 +371,12 @@ async def _run_resume(job_id: str):
                         if last_phase:
                             console.print(f"  [green]✓[/green] {last_phase.replace('_', ' ').title()} complete")
 
-                        status.update(_get_phase_message(current_phase))
+                        # Stop spinner for human review phase (needs interactive input)
+                        if current_phase == Phase.REVIEWING.value:
+                            status.stop()
+                        else:
+                            # Update spinner for new phase
+                            status.update(_get_phase_message(current_phase))
                         last_phase = current_phase
 
                     # Special handling for writing phase
@@ -274,6 +420,9 @@ async def _run_resume(job_id: str):
             console.print(f"  📝 Words: {metadata.get('word_count', 'N/A')}")
             console.print(f"  ⏱️  Reading time: {metadata.get('reading_time_minutes', 'N/A')} min")
             console.print(f"  📑 Sections: {metadata.get('section_count', 'N/A')}")
+
+        # Show execution metrics
+        display_metrics_summary(result)
 
     except KeyboardInterrupt:
         console.print("\n[yellow]⚠️  Interrupted. Job saved for resume.[/yellow]")

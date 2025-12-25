@@ -8,11 +8,13 @@ Nodes are async functions that handle one phase of the pipeline.
 import asyncio
 import hashlib
 import logging
+import time
 from typing import Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from .config import (
+    GEMINI_PRICING,
     LLM_MODEL_FULL,
     LLM_MODEL_LITE,
     LLM_TEMPERATURE_LOW,
@@ -41,10 +43,94 @@ from .state import (
     SectionCriticResult,
     SourceValidationList,
     TransitionFix,
+    phase_is_past,
 )
 from .tools import fetch_url_content, search_duckduckgo
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Metrics Tracking Helpers
+# =============================================================================
+
+
+def _calculate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
+    """Calculate cost in USD for an LLM call."""
+    pricing = GEMINI_PRICING.get(model, GEMINI_PRICING.get("gemini-2.5-flash-lite", {}))
+    input_cost = (tokens_in / 1_000_000) * pricing.get("input", 0)
+    output_cost = (tokens_out / 1_000_000) * pricing.get("output", 0)
+    return input_cost + output_cost
+
+
+def _init_node_metrics(state: dict, node_name: str) -> tuple[dict, float]:
+    """
+    Initialize metrics tracking for a node.
+
+    Returns:
+        Tuple of (node_metrics dict, start_time)
+    """
+    metrics = state.get("metrics", {})
+    if node_name not in metrics:
+        metrics[node_name] = {
+            "duration_s": 0.0,
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "calls": 0,
+            "cost": 0.0,
+        }
+    return metrics, time.time()
+
+
+def _record_llm_call(
+    metrics: dict,
+    node_name: str,
+    model: str,
+    tokens_in: int,
+    tokens_out: int,
+) -> float:
+    """
+    Record an LLM call and return the cost.
+
+    Args:
+        metrics: The full metrics dict
+        node_name: Name of the current node
+        model: LLM model used
+        tokens_in: Input tokens
+        tokens_out: Output tokens
+
+    Returns:
+        Cost of this call in USD
+    """
+    cost = _calculate_cost(model, tokens_in, tokens_out)
+    node_metrics = metrics.get(node_name, {})
+    node_metrics["tokens_in"] = node_metrics.get("tokens_in", 0) + tokens_in
+    node_metrics["tokens_out"] = node_metrics.get("tokens_out", 0) + tokens_out
+    node_metrics["calls"] = node_metrics.get("calls", 0) + 1
+    node_metrics["cost"] = node_metrics.get("cost", 0.0) + cost
+    metrics[node_name] = node_metrics
+
+    logger.info(
+        f"  └─ {model}: {tokens_in:,} in / {tokens_out:,} out (${cost:.4f})"
+    )
+    return cost
+
+
+def _finalize_node_metrics(
+    metrics: dict,
+    node_name: str,
+    start_time: float,
+) -> dict:
+    """
+    Finalize metrics for a node by recording duration.
+
+    Returns:
+        The updated metrics dict
+    """
+    duration = time.time() - start_time
+    if node_name in metrics:
+        metrics[node_name]["duration_s"] = duration
+    return metrics
 
 
 # =============================================================================
@@ -70,7 +156,15 @@ async def topic_discovery_node(state: BlogAgentState) -> dict[str, Any]:
         - discovery_queries: List of generated search queries
         - topic_context: List of {title, url, snippet} dicts
         - current_phase: Updated to PLANNING
+        - metrics: Updated metrics dict
     """
+    # Skip if phase already past this node (resumption)
+    if phase_is_past(state.get("current_phase", ""), Phase.TOPIC_DISCOVERY):
+        logger.info("Skipping topic_discovery_node - phase already past")
+        return {}
+
+    node_name = "topic_discovery"
+    metrics, start_time = _init_node_metrics(state, node_name)
     logger.info(f"Starting topic discovery for: {state.get('title')}")
 
     title = state.get("title", "")
@@ -81,6 +175,7 @@ async def topic_discovery_node(state: BlogAgentState) -> dict[str, Any]:
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": "Title is required for topic discovery",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
     try:
@@ -92,6 +187,8 @@ async def topic_discovery_node(state: BlogAgentState) -> dict[str, Any]:
             title=title,
             context=context,
             key_manager=key_manager,
+            metrics=metrics,
+            node_name=node_name,
         )
         queries = discovery_result.queries
         logger.info(f"Generated {len(queries)} discovery queries: {queries}")
@@ -120,6 +217,7 @@ async def topic_discovery_node(state: BlogAgentState) -> dict[str, Any]:
             "discovery_queries": queries,
             "topic_context": topic_context,
             "current_phase": Phase.PLANNING.value,
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
     except RuntimeError as e:
@@ -127,12 +225,14 @@ async def topic_discovery_node(state: BlogAgentState) -> dict[str, Any]:
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": str(e),
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
     except Exception as e:
         logger.error(f"Unexpected error in topic discovery: {e}")
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": f"Unexpected error: {e}",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
 
@@ -141,6 +241,8 @@ async def _generate_discovery_queries(
     context: str,
     key_manager: KeyManager,
     max_retries: int = 3,
+    metrics: dict | None = None,
+    node_name: str = "topic_discovery",
 ) -> DiscoveryQueries:
     """
     Generate search queries using Gemini Flash-Lite with structured output.
@@ -150,6 +252,8 @@ async def _generate_discovery_queries(
         context: User-provided context
         key_manager: KeyManager for API key rotation
         max_retries: Maximum retry attempts
+        metrics: Optional metrics dict to update
+        node_name: Name of the calling node for metrics
 
     Returns:
         DiscoveryQueries Pydantic model with 3-5 queries
@@ -157,6 +261,7 @@ async def _generate_discovery_queries(
     Raises:
         RuntimeError: If all API keys exhausted or max retries exceeded
     """
+    model = LLM_MODEL_LITE
     prompt = f"""Generate 3-5 search queries to learn about this topic:
 
 Title: "{title}"
@@ -178,7 +283,7 @@ Output JSON: {{ "queries": ["...", "...", ...] }}"""
         try:
             # Initialize model with structured output
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash-lite",
+                model=model,
                 google_api_key=api_key,
                 temperature=0.7,
             )
@@ -192,12 +297,16 @@ Output JSON: {{ "queries": ["...", "...", ...] }}"""
                 None, lambda: structured_llm.invoke(prompt)
             )
 
-            # Record usage (approximate - actual tokens would come from response metadata)
-            key_manager.record_usage(
-                api_key,
-                tokens_in=len(prompt) // 4,
-                tokens_out=100,
-            )
+            # Estimate tokens
+            tokens_in = len(prompt) // 4
+            tokens_out = 100
+
+            # Record usage in key manager
+            key_manager.record_usage(api_key, tokens_in=tokens_in, tokens_out=tokens_out)
+
+            # Record metrics if provided
+            if metrics is not None:
+                _record_llm_call(metrics, node_name, model, tokens_in, tokens_out)
 
             return result
 
@@ -584,7 +693,15 @@ async def content_landscape_analysis_node(state: BlogAgentState) -> dict[str, An
         State update dict with:
         - content_strategy: ContentStrategy as dict
         - current_phase: Updated to PLANNING
+        - metrics: Updated metrics dict
     """
+    # Skip if phase already past this node (resumption)
+    if phase_is_past(state.get("current_phase", ""), Phase.CONTENT_LANDSCAPE):
+        logger.info("Skipping content_landscape_analysis_node - phase already past")
+        return {}
+
+    node_name = "content_landscape"
+    metrics, start_time = _init_node_metrics(state, node_name)
     logger.info(f"Starting content landscape analysis for: {state.get('title')}")
 
     title = state.get("title", "")
@@ -596,6 +713,7 @@ async def content_landscape_analysis_node(state: BlogAgentState) -> dict[str, An
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": "Title is required for content landscape analysis",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
     if not topic_context:
@@ -603,6 +721,7 @@ async def content_landscape_analysis_node(state: BlogAgentState) -> dict[str, An
         return {
             "content_strategy": None,
             "current_phase": Phase.PLANNING.value,
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
     try:
@@ -656,6 +775,13 @@ async def content_landscape_analysis_node(state: BlogAgentState) -> dict[str, An
             elif result is not None:
                 analyzed_articles.append(result)
 
+        # Record metrics for article analysis (estimate: ~2000 tokens in, 500 out per article)
+        num_analyzed = len(analyzed_articles)
+        if num_analyzed > 0:
+            tokens_in = num_analyzed * 2000
+            tokens_out = num_analyzed * 500
+            _record_llm_call(metrics, node_name, LLM_MODEL_LITE, tokens_in, tokens_out)
+
         logger.info(f"Successfully analyzed {len(analyzed_articles)} articles")
 
         if len(analyzed_articles) < 3:
@@ -704,6 +830,7 @@ async def content_landscape_analysis_node(state: BlogAgentState) -> dict[str, An
             return {
                 "content_strategy": strategy_dict,
                 "current_phase": Phase.PLANNING.value,
+                "metrics": _finalize_node_metrics(metrics, node_name, start_time),
             }
         else:
             # Step 4: Synthesize content strategy
@@ -713,6 +840,8 @@ async def content_landscape_analysis_node(state: BlogAgentState) -> dict[str, An
                 analyzed_articles=analyzed_articles,
                 key_manager=key_manager,
             )
+            # Record synthesis metrics (estimate: ~3000 tokens in, 500 out)
+            _record_llm_call(metrics, node_name, LLM_MODEL_LITE, 3000, 500)
 
         logger.info(f"Content strategy: unique_angle='{content_strategy.unique_angle}'")
         logger.info(f"Gaps to fill: {len(content_strategy.gaps_to_fill)}")
@@ -743,6 +872,7 @@ async def content_landscape_analysis_node(state: BlogAgentState) -> dict[str, An
         return {
             "content_strategy": strategy_dict,
             "current_phase": Phase.PLANNING.value,
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
     except RuntimeError as e:
@@ -750,12 +880,14 @@ async def content_landscape_analysis_node(state: BlogAgentState) -> dict[str, An
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": str(e),
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
     except Exception as e:
         logger.error(f"Unexpected error in content landscape analysis: {e}")
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": f"Unexpected error: {e}",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
 
@@ -1017,7 +1149,15 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
         State update dict with:
         - plan: BlogPlan as dict
         - current_phase: Updated to RESEARCHING
+        - metrics: Updated metrics dict
     """
+    # Skip if phase already past this node (resumption)
+    if phase_is_past(state.get("current_phase", ""), Phase.PLANNING):
+        logger.info("Skipping planning_node - phase already past")
+        return {}
+
+    node_name = "planning"
+    metrics, start_time = _init_node_metrics(state, node_name)
     logger.info(f"Starting planning for: {state.get('title')}")
 
     title = state.get("title", "")
@@ -1038,6 +1178,7 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": "Title is required for planning",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
     # Map target_length to target_words
@@ -1056,6 +1197,9 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
             key_manager=key_manager,
             content_strategy=content_strategy,
         )
+
+        # Record LLM call metrics (estimate: ~1500 tokens in, 500 out for plan)
+        _record_llm_call(metrics, node_name, LLM_MODEL_LITE, 1500, 500)
 
         # Convert to dict for state storage
         plan_dict = plan.model_dump()
@@ -1077,6 +1221,7 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
         return {
             "plan": plan_dict,
             "current_phase": Phase.RESEARCHING.value,
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
     except RuntimeError as e:
@@ -1084,12 +1229,14 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": str(e),
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
     except Exception as e:
         logger.error(f"Unexpected error in planning: {e}")
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": f"Unexpected error: {e}",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
 
@@ -1198,7 +1345,15 @@ async def research_node(state: BlogAgentState) -> dict[str, Any]:
         State update dict with:
         - research_cache: Dict of url_hash -> content data
         - current_phase: Updated to VALIDATING_SOURCES
+        - metrics: Updated metrics dict
     """
+    # Skip if phase already past this node (resumption)
+    if phase_is_past(state.get("current_phase", ""), Phase.RESEARCHING):
+        logger.info("Skipping research_node - phase already past")
+        return {}
+
+    node_name = "research"
+    metrics, start_time = _init_node_metrics(state, node_name)
     logger.info("Starting research phase")
 
     plan = state.get("plan", {})
@@ -1210,6 +1365,7 @@ async def research_node(state: BlogAgentState) -> dict[str, Any]:
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": "No sections found in plan",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
     try:
@@ -1257,6 +1413,7 @@ async def research_node(state: BlogAgentState) -> dict[str, Any]:
         return {
             "research_cache": research_cache,
             "current_phase": Phase.VALIDATING_SOURCES.value,
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
     except Exception as e:
@@ -1264,6 +1421,7 @@ async def research_node(state: BlogAgentState) -> dict[str, Any]:
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": f"Research failed: {e}",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
 
@@ -1527,6 +1685,7 @@ async def _validate_section_sources(
             error_str = str(e).lower()
             last_error = e
 
+            # Handle rate limiting
             if "429" in str(e) or "quota" in error_str or "resource" in error_str:
                 logger.warning("Rate limited on key, rotating...")
                 key_manager.mark_rate_limited(api_key)
@@ -1536,6 +1695,16 @@ async def _validate_section_sources(
                     raise RuntimeError("All API keys exhausted or rate-limited")
                 continue
 
+            # Retry on parsing/validation errors (LLM returned incomplete output)
+            if "field required" in error_str or "validation error" in error_str:
+                logger.warning(
+                    f"Source validation parsing failed (attempt {attempt + 1}/{max_retries}), retrying..."
+                )
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1)  # Brief delay before retry
+                    continue
+
+            # For other errors, log and retry with backoff
             logger.error(f"Validation attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(2**attempt)
@@ -1560,7 +1729,16 @@ async def validate_sources_node(state: BlogAgentState) -> dict[str, Any]:
         State update dict with:
         - validated_sources: Dict of section_id -> list of validated sources
         - current_phase: Updated to WRITING
+        - metrics: Updated metrics dict
     """
+    # Skip if phase already past this node (resumption)
+    if phase_is_past(state.get("current_phase", ""), Phase.VALIDATING_SOURCES):
+        logger.info("Skipping validate_sources_node - phase already past")
+        return {}
+
+    node_name = "validate_sources"
+    metrics, start_time = _init_node_metrics(state, node_name)
+    llm_call_count = 0  # Track number of validation calls for metrics
     logger.info("Starting source validation phase")
 
     plan = state.get("plan", {})
@@ -1573,6 +1751,7 @@ async def validate_sources_node(state: BlogAgentState) -> dict[str, Any]:
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": "No sections found in plan",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
     try:
@@ -1608,6 +1787,7 @@ async def validate_sources_node(state: BlogAgentState) -> dict[str, Any]:
                 all_sections=sections,
                 min_sources=MIN_SOURCES_PER_SECTION,
             )
+            llm_call_count += 1
 
             # Track queries that have been used
             used_queries = set(section.get("search_queries", []))
@@ -1637,6 +1817,7 @@ async def validate_sources_node(state: BlogAgentState) -> dict[str, Any]:
                     retry_attempt=retry_count - 1,  # 0-indexed for modifier selection
                     failed_sources=failed_sources,
                 )
+                llm_call_count += 1
                 used_queries.update(alt_queries)
 
                 # Research with new queries
@@ -1660,6 +1841,7 @@ async def validate_sources_node(state: BlogAgentState) -> dict[str, Any]:
                         all_sections=sections,
                         min_sources=MIN_SOURCES_PER_SECTION,
                     )
+                    llm_call_count += 1
                     validated.extend(new_validated)
 
                 logger.info(f"After retry {retry_count}: {len(validated)} sources for {section_id}")
@@ -1680,23 +1862,45 @@ async def validate_sources_node(state: BlogAgentState) -> dict[str, Any]:
         total_validated = sum(len(s) for s in validated_sources.values())
         logger.info(f"Validation complete: {total_validated} sources validated across {len(sections)} sections")
 
+        # Record LLM metrics (estimate: ~2500 tokens in, 300 out per validation call)
+        if llm_call_count > 0:
+            _record_llm_call(
+                metrics, node_name, LLM_MODEL_LITE,
+                llm_call_count * 2500, llm_call_count * 300
+            )
+
         return {
             "validated_sources": validated_sources,
             "research_cache": research_cache,  # Include updated cache from retries
             "current_phase": Phase.WRITING.value,
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
     except RuntimeError as e:
         logger.error(f"Source validation failed: {e}")
+        # Record any LLM calls that happened before failure
+        if llm_call_count > 0:
+            _record_llm_call(
+                metrics, node_name, LLM_MODEL_LITE,
+                llm_call_count * 2500, llm_call_count * 300
+            )
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": str(e),
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
     except Exception as e:
         logger.error(f"Unexpected error in source validation: {e}")
+        # Record any LLM calls that happened before failure
+        if llm_call_count > 0:
+            _record_llm_call(
+                metrics, node_name, LLM_MODEL_LITE,
+                llm_call_count * 2500, llm_call_count * 300
+            )
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": f"Unexpected error: {e}",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
 
@@ -2421,7 +2625,18 @@ async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
         - section_drafts: Updated with new section content
         - current_section_index: Incremented for next section
         - current_phase: Stays WRITING (graph controls phase transition)
+        - metrics: Updated metrics dict
     """
+    # Skip if phase already past this node (resumption)
+    if phase_is_past(state.get("current_phase", ""), Phase.WRITING):
+        logger.info("Skipping write_section_node - phase already past")
+        return {}
+
+    node_name = "write_section"
+    metrics, start_time = _init_node_metrics(state, node_name)
+    write_calls = 0  # Track write calls (full model)
+    critic_calls = 0  # Track critic calls (lite model)
+    refine_calls = 0  # Track refine calls (full model)
     logger.info("Starting write section node")
 
     plan = state.get("plan", {})
@@ -2441,6 +2656,7 @@ async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
             "current_section_index": current_idx,
             "section_drafts": section_drafts,
             "current_phase": Phase.ASSEMBLING.value,
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
     section = required_sections[current_idx]
@@ -2466,6 +2682,7 @@ async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
             blog_title=blog_title,
             key_manager=key_manager,
         )
+        write_calls += 1
         logger.info(f"Section '{section_title}' written ({len(content.split())} words)")
 
         # Initialize scratchpad for refinement tracking
@@ -2480,6 +2697,7 @@ async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
             context=state.get("context", ""),
             scratchpad=scratchpad,
         )
+        critic_calls += 1
 
         # Add initial entry to scratchpad
         scratchpad.append(_build_scratchpad_entry(0, critic_result))
@@ -2555,6 +2773,7 @@ async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
                 scratchpad=scratchpad,
                 additional_sources=additional_sources if additional_sources else None,
             )
+            refine_calls += 1
 
             # Re-evaluate refined content with scratchpad context
             critic_result = await _critic_section(
@@ -2565,6 +2784,7 @@ async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
                 context=state.get("context", ""),
                 scratchpad=scratchpad,
             )
+            critic_calls += 1
 
             # Add refinement entry to scratchpad with research tracking
             scratchpad.append(
@@ -2643,24 +2863,62 @@ async def write_section_node(state: BlogAgentState) -> dict[str, Any]:
 
         logger.info(f"Section '{section_title}' completed with critic evaluation")
 
+        # Record LLM metrics
+        # Write/refine use full model (~2000 in, ~800 out), critic uses lite model (~1500 in, ~300 out)
+        if write_calls + refine_calls > 0:
+            _record_llm_call(
+                metrics, node_name, LLM_MODEL_FULL,
+                (write_calls + refine_calls) * 2000, (write_calls + refine_calls) * 800
+            )
+        if critic_calls > 0:
+            _record_llm_call(
+                metrics, node_name, LLM_MODEL_LITE,
+                critic_calls * 1500, critic_calls * 300
+            )
+
         return {
             "section_drafts": section_drafts,
             "section_reviews": section_reviews,
             "current_section_index": current_idx + 1,
             "current_phase": Phase.WRITING.value,
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
     except RuntimeError as e:
         logger.error(f"Section writing failed: {e}")
+        # Record any LLM calls before failure
+        if write_calls + refine_calls > 0:
+            _record_llm_call(
+                metrics, node_name, LLM_MODEL_FULL,
+                (write_calls + refine_calls) * 2000, (write_calls + refine_calls) * 800
+            )
+        if critic_calls > 0:
+            _record_llm_call(
+                metrics, node_name, LLM_MODEL_LITE,
+                critic_calls * 1500, critic_calls * 300
+            )
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": str(e),
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
     except Exception as e:
         logger.error(f"Unexpected error in section writing: {e}")
+        # Record any LLM calls before failure
+        if write_calls + refine_calls > 0:
+            _record_llm_call(
+                metrics, node_name, LLM_MODEL_FULL,
+                (write_calls + refine_calls) * 2000, (write_calls + refine_calls) * 800
+            )
+        if critic_calls > 0:
+            _record_llm_call(
+                metrics, node_name, LLM_MODEL_LITE,
+                critic_calls * 1500, critic_calls * 300
+            )
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": f"Unexpected error: {e}",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
 
@@ -3040,7 +3298,17 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
         - final_review: FinalCriticResult as dict
         - metadata: Blog metadata with critic scores
         - current_phase: Updated to REVIEWING
+        - metrics: Updated metrics dict
     """
+    # Skip if phase already past this node (resumption)
+    if phase_is_past(state.get("current_phase", ""), Phase.ASSEMBLING):
+        logger.info("Skipping final_assembly_node - phase already past")
+        return {}
+
+    node_name = "final_assembly"
+    metrics, start_time = _init_node_metrics(state, node_name)
+    critic_calls = 0
+    fix_calls = 0
     logger.info("Starting final assembly")
 
     plan = state.get("plan", {})
@@ -3053,6 +3321,7 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": "No section drafts to assemble",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
     try:
@@ -3081,6 +3350,7 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
                 blog_title=blog_title,
                 key_manager=key_manager,
             )
+            critic_calls += 1
 
             if critic_result.overall_pass:
                 logger.info("Final critic passed")
@@ -3094,6 +3364,7 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
                     fixes=critic_result.transition_fixes,
                     key_manager=key_manager,
                 )
+                fix_calls += 1
 
         # Calculate metadata
         word_count = _count_words(final_draft)
@@ -3163,19 +3434,32 @@ async def final_assembly_node(state: BlogAgentState) -> dict[str, Any]:
                 },
             )
 
+        # Record LLM metrics (critic uses lite model ~3000 in, 500 out; fixes use full ~2000 in, 500 out)
+        if critic_calls > 0:
+            _record_llm_call(metrics, node_name, LLM_MODEL_LITE, critic_calls * 3000, critic_calls * 500)
+        if fix_calls > 0:
+            _record_llm_call(metrics, node_name, LLM_MODEL_FULL, fix_calls * 2000, fix_calls * 500)
+
         return {
             "combined_draft": combined_draft,
             "final_markdown": final_draft,
             "final_review": final_review,
             "metadata": metadata,
             "current_phase": Phase.REVIEWING.value,
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
     except Exception as e:
         logger.error(f"Final assembly failed: {e}")
+        # Record any LLM calls before failure
+        if critic_calls > 0:
+            _record_llm_call(metrics, node_name, LLM_MODEL_LITE, critic_calls * 3000, critic_calls * 500)
+        if fix_calls > 0:
+            _record_llm_call(metrics, node_name, LLM_MODEL_FULL, fix_calls * 2000, fix_calls * 500)
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": f"Final assembly failed: {e}",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
 
@@ -3190,6 +3474,14 @@ async def human_review_node(state: BlogAgentState) -> dict[str, Any]:
 
     Displays completion message and asks user to approve or quit.
     """
+    # Skip if phase already past this node (resumption)
+    if phase_is_past(state.get("current_phase", ""), Phase.REVIEWING):
+        logger.info("Skipping human_review_node - phase already past")
+        return {}
+
+    node_name = "human_review"
+    metrics, start_time = _init_node_metrics(state, node_name)
+
     from rich.console import Console
     from rich.prompt import Confirm
 
@@ -3217,8 +3509,10 @@ async def human_review_node(state: BlogAgentState) -> dict[str, Any]:
         return {
             "human_review_decision": "approve",
             "current_phase": Phase.DONE.value,
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
     else:
         return {
             "human_review_decision": "quit",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }

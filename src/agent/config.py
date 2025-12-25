@@ -31,6 +31,12 @@ LLM_MODEL_FULL = "gemini-2.5-flash"
 LLM_TEMPERATURE_LOW = 0.3
 LLM_TEMPERATURE_MEDIUM = 0.7
 
+# Gemini API Pricing (per 1M tokens, USD)
+GEMINI_PRICING = {
+    "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
+    "gemini-2.5-flash-lite": {"input": 0.02, "output": 0.08},
+}
+
 # Target word counts
 TARGET_WORDS_MAP = {
     "short": 800,

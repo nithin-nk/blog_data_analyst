@@ -45,6 +45,44 @@ class Phase(str, Enum):
     FAILED = "failed"
 
 
+# Phase ordering for resumption logic (excludes FAILED which is a terminal state)
+PHASE_ORDER = [
+    Phase.TOPIC_DISCOVERY,
+    Phase.CONTENT_LANDSCAPE,
+    Phase.PLANNING,
+    Phase.RESEARCHING,
+    Phase.VALIDATING_SOURCES,
+    Phase.WRITING,
+    Phase.ASSEMBLING,
+    Phase.REVIEWING,
+    Phase.DONE,
+]
+
+
+def phase_is_past(current_phase: str, check_phase: Phase) -> bool:
+    """
+    Return True if current_phase is past check_phase (node should skip).
+
+    Used for resumption: if the saved phase is past a node's phase,
+    that node should skip execution.
+
+    Args:
+        current_phase: The current phase string from state
+        check_phase: The phase to check against
+
+    Returns:
+        True if current_phase > check_phase in the pipeline order
+    """
+    if not current_phase:
+        return False
+    try:
+        current_idx = PHASE_ORDER.index(Phase(current_phase))
+        check_idx = PHASE_ORDER.index(check_phase)
+        return current_idx > check_idx
+    except (ValueError, KeyError):
+        return False
+
+
 # =============================================================================
 # BlogAgentState (TypedDict for LangGraph)
 # =============================================================================
@@ -102,6 +140,9 @@ class BlogAgentState(TypedDict, total=False):
     # === Output ===
     final_markdown: str
     metadata: dict[str, Any]
+
+    # === Metrics Tracking ===
+    metrics: dict[str, Any]  # {node_name: {duration_s, tokens_in, tokens_out, calls, cost}}
 
     # === Error Handling ===
     error_message: str | None
