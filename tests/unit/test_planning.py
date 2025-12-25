@@ -134,16 +134,16 @@ class TestTargetWordsMap:
     """Tests for TARGET_WORDS_MAP constant."""
 
     def test_short_length(self):
-        """Short length maps to 800 words."""
-        assert TARGET_WORDS_MAP["short"] == 800
+        """Short length maps to 500 words."""
+        assert TARGET_WORDS_MAP["short"] == 500
 
     def test_medium_length(self):
-        """Medium length maps to 1500 words."""
-        assert TARGET_WORDS_MAP["medium"] == 1500
+        """Medium length maps to 1000 words."""
+        assert TARGET_WORDS_MAP["medium"] == 1000
 
     def test_long_length(self):
-        """Long length maps to 2500 words."""
-        assert TARGET_WORDS_MAP["long"] == 2500
+        """Long length maps to 1500 words."""
+        assert TARGET_WORDS_MAP["long"] == 1500
 
 
 # =============================================================================

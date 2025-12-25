@@ -52,13 +52,14 @@ STYLE_GUIDE = """
 Write short, punchy sentences for experienced engineers. Talk like you're explaining to a colleague over coffee.
 
 SENTENCE STRUCTURE (HARD REQUIREMENTS):
-- 5-15 words per sentence (STRICT constraint)
-- Average 10-14 words across each section
-- One idea per sentence
-- No semicolons (they create compound thoughts)
-- No nested clauses
+- 10-18 words per sentence (target range)
+- Average 12-16 words across each section
+- One complete thought per sentence
+- No semicolons (use natural connectors like 'because', 'when', 'which' instead)
+- Avoid deeply nested clauses
 - Active voice whenever possible
 - Use fragments when natural ("Still, caching is important.")
+- Combine related ideas with conjunctions rather than breaking into choppy fragments
 
 LANGUAGE:
 - Simple words. Be direct.
@@ -87,20 +88,20 @@ BAD → GOOD EXAMPLES:
 ❌ BAD (Formal, 28 words):
 "Caching presents a crucial optimization opportunity because LLM agents typically require significant execution time and inference operations incur substantial costs."
 
-✅ GOOD (Punchy, 3 sentences, 15 total words):
-"Caching is important. LLM agents take time to run. Inference is expensive."
+✅ GOOD (Punchy, complete thought, 15 words):
+"Caching is important because LLM agents take time to run and inference is expensive."
 
 ❌ BAD (Formal, 24 words):
 "Traditional caching mechanisms prove ineffective due to their reliance on exact string matching, which is fundamentally ill-suited to natural language inputs."
 
-✅ GOOD (Punchy, 3 sentences, 15 total words):
-"Traditional caching fails. It works on exact matching. Natural language rarely matches exactly."
+✅ GOOD (Punchy, complete thought, 16 words):
+"Traditional caching fails because it relies on exact matching, which rarely works for natural language."
 
 ❌ BAD (Academic, 19 words):
 "The implementation leverages Redis with RediSearch to efficiently store and retrieve semantically similar query embeddings."
 
-✅ GOOD (Punchy, 2 sentences, 11 total words):
-"Use Redis with RediSearch. It stores and finds similar embeddings fast."
+✅ GOOD (Punchy, complete thought, 12 words):
+"Use Redis with RediSearch to store and find similar embeddings fast."
 
 When discussing tradeoffs, be honest about drawbacks. Keep it punchy.
 """

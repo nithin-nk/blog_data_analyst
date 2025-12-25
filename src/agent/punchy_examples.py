@@ -16,8 +16,8 @@ PUNCHY_EXAMPLES_BY_ROLE = {
 ❌ BAD (Academic, passive voice):
 "Traditional caching mechanisms prove ineffective due to their reliance on exact string matching, which is fundamentally ill-suited to the inherent variability present in natural language inputs. This results in suboptimal cache hit rates and leads to redundant computational overhead."
 
-✅ GOOD (Punchy, active):
-"Traditional caching fails. It works on exact matching. Natural language rarely matches exactly. Result: cache misses everywhere. Redundant computation. Wasted money."
+✅ GOOD (Punchy, active, complete thoughts):
+"Traditional caching fails because it relies on exact matching. Natural language queries rarely match exactly. Result: cache misses everywhere, redundant computation, and wasted money."
 """,
 
     "why": """
@@ -58,8 +58,8 @@ Store embeddings as bytes. TTL controls freshness."
 ❌ BAD (Sugar-coating):
 "While semantic caching offers significant benefits, practitioners should be mindful of certain considerations that may arise during implementation."
 
-✅ GOOD (Honest, direct):
-"Semantic caching has real drawbacks. Every query adds 100-400ms for embedding generation. Cache misses hurt more than no cache. Similarity threshold is hard to tune. Get it wrong and you serve bad answers."
+✅ GOOD (Honest, direct, complete thoughts):
+"Semantic caching has real drawbacks. Every query adds 100-400ms for embedding generation. Cache misses hurt more than having no cache at all. The similarity threshold is hard to tune, and getting it wrong means serving bad answers to users."
 """,
 
     "conclusion": """

@@ -174,7 +174,7 @@ class TestBuildWriterPrompt:
         )
 
         assert "HOOK section" in prompt
-        assert "grab the reader's attention" in prompt
+        assert "Grab attention" in prompt
 
     def test_deep_dive_role_instructions(self):
         """Deep dive role gets implementation instructions."""
@@ -187,8 +187,8 @@ class TestBuildWriterPrompt:
             blog_title="Test",
         )
 
-        assert "DEEP DIVE" in prompt
-        assert "PRIMARY content" in prompt
+        assert "IMPLEMENTATION" in prompt
+        assert "PRIMARY" in prompt
 
     def test_conclusion_role_instructions(self):
         """Conclusion role gets takeaway instructions."""
@@ -202,7 +202,7 @@ class TestBuildWriterPrompt:
         )
 
         assert "CONCLUSION section" in prompt
-        assert "actionable takeaways" in prompt
+        assert "next steps" in prompt
 
     def test_needs_code_requirement(self):
         """Code requirement is included when needs_code=True."""

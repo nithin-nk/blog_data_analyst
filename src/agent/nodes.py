@@ -167,7 +167,7 @@ def _analyze_sentence_lengths(content: str) -> dict[str, Any]:
     - Count of long sentences (> 20 words)
     - Count of very long sentences (> 25 words)
     - Count of semicolons (compound sentences)
-    - Percentage of simple sentences (<= 15 words)
+    - Percentage of simple sentences (<= 18 words)
 
     Args:
         content: Markdown content to analyze
@@ -179,7 +179,7 @@ def _analyze_sentence_lengths(content: str) -> dict[str, Any]:
         - long_sentences: int (count of sentences > 20 words)
         - very_long_sentences: int (count of sentences > 25 words)
         - semicolons: int (count of semicolons in content)
-        - percent_simple: float (% of sentences <= 15 words)
+        - percent_simple: float (% of sentences <= 18 words)
         - total_sentences: int (total sentence count)
     """
     import re
@@ -210,7 +210,7 @@ def _analyze_sentence_lengths(content: str) -> dict[str, Any]:
     max_length = max(word_counts)
     long_sentences = sum(1 for wc in word_counts if wc > 20)
     very_long_sentences = sum(1 for wc in word_counts if wc > 25)
-    simple_sentences = sum(1 for wc in word_counts if wc <= 15)
+    simple_sentences = sum(1 for wc in word_counts if wc <= 18)
     percent_simple = (simple_sentences / len(word_counts)) * 100
 
     # Count semicolons (indicator of compound sentences)
@@ -3343,12 +3343,14 @@ def _build_writer_prompt(
     # Sentence structure requirements (common to all roles)
     sentence_requirements = """
 SENTENCE STRUCTURE (CRITICAL):
-- 5-15 words per sentence (STRICT constraint)
-- Average 10-14 words for this section
-- One idea per sentence
-- No semicolons or nested clauses
+- 10-18 words per sentence (target range)
+- Average 12-16 words for this section
+- One complete thought per sentence
+- No semicolons (use natural connectors like 'because', 'when', 'which' instead)
+- Avoid deeply nested clauses
 - Active voice preferred
 - Use fragments when natural ("Still, important.")
+- Combine related ideas with conjunctions rather than breaking into choppy fragments
 """
 
     if section_role == "hook":
@@ -3659,7 +3661,7 @@ def _build_critic_prompt(
 - Sentences > 20 words: {metrics['long_sentences']}
 - Sentences > 25 words: {metrics['very_long_sentences']}
 - Semicolons: {metrics['semicolons']}
-- Simple sentences (≤15 words): {metrics['percent_simple']:.1f}%
+- Simple sentences (≤18 words): {metrics['percent_simple']:.1f}%
 - Total sentences: {metrics['total_sentences']}
 
 **Writing Style Guidelines:**
@@ -3673,23 +3675,24 @@ def _build_critic_prompt(
 4. **clarity (1-10):** Is it easy to understand? Clear explanations?
 5. **voice (1-10):** PUNCHY STYLE EVALUATION with HARD METRICS:
    - Start at 10, then apply deductions:
-   - If avg_length > 16 words: Deduct 2 points
-   - If avg_length > 18 words: Deduct 3 points (total)
-   - If any sentence > 25 words: Deduct 1 point per sentence
+   - If avg_length > 18 words: Deduct 2 points
+   - If avg_length > 22 words: Deduct 3 points (total)
+   - If any sentence > 30 words: Deduct 1 point per sentence
    - If semicolons > 0: Deduct 1 point
-   - If simple sentences < 70%: Deduct 1 point
-   - If contains "therefore", "however", "moreover", "furthermore": Deduct 1 point total
+   - If simple sentences (≤18 words) < 65%: Deduct 1 point
+   - If contains excessive transition words ("therefore", "however", "moreover", "furthermore" used 3+ times): Deduct 1 point
    - If uses "leverage", "utilize", "facilitate" instead of simple verbs: Deduct 1 point
 
    **Target metrics for score 10:**
-   - Avg: 10-14 words
-   - No sentences > 20 words
+   - Avg: 12-16 words
+   - No sentences > 22 words
    - No semicolons
-   - Simple sentences > 80%
+   - Simple sentences (≤18 words) > 70%
+   - Complete thoughts, not fragmented ideas
 
-   **Score 7-9:** Avg 12-16 words, 1-2 long sentences
-   **Score 4-6:** Avg 15-18 words, several long sentences
-   **Score 1-3:** Avg > 18 words, academic/formal style
+   **Score 7-9:** Avg 14-18 words, 1-2 sentences up to 25 words
+   **Score 4-6:** Avg 17-22 words, several sentences 25-30 words
+   **Score 1-3:** Avg > 22 words, academic/formal style, incomplete thoughts split awkwardly
 6. **originality (1-10):** Original insights, not just paraphrasing?
 7. **length (1-10):** Word count appropriate? (8-10: ±20% of target, 5-7: ±40%, 1-4: >40% off)
 8. **diagram_quality (1-10):** If diagram present: Is it clear and helpful? (10 if no diagram needed)
@@ -3885,11 +3888,13 @@ def _build_refiner_prompt(
 2. Address EACH issue listed above with the suggested fixes
 3. Preserve parts that are working well (high-scoring dimensions)
 4. **CRITICAL FOR VOICE/STYLE ISSUES:**
-   - Break long sentences into multiple short ones (5-15 words each)
+   - Ensure sentences express complete thoughts (10-18 words target)
+   - Combine choppy fragments into complete sentences using natural connectors (because, when, which)
    - Use simple words. Avoid complex constructions.
-   - Replace "however, therefore, moreover" with punchy fragments
+   - Replace excessive "however, therefore, moreover" with natural flow or fragments when appropriate
    - Replace "leverage, utilize, facilitate" with simple verbs (use, help, enable)
    - **Preserve original insights** - improve sentence structure only, don't lose unique ideas
+   - Don't break complete thoughts into awkward fragments just to hit word count
 5. Follow the writing style guidelines above (direct, opinionated, short sentences, no fluff)
 6. Keep word count near target ({target_words} words, ±20%)
 7. Ensure code examples are runnable with imports
@@ -4486,7 +4491,7 @@ You have evaluated this blog {len(scratchpad)} time(s) before. Track improvement
 - Average sentence length: {overall_metrics['avg_length']} words
 - Longest sentence: {overall_metrics['max_length']} words
 - Sentences > 20 words: {overall_metrics['long_sentences']}
-- Simple sentences (≤15 words): {overall_metrics['percent_simple']:.1f}%
+- Simple sentences (≤18 words): {overall_metrics['percent_simple']:.1f}%
 
 {assembly_history_section}
 
@@ -4495,16 +4500,18 @@ You have evaluated this blog {len(scratchpad)} time(s) before. Track improvement
 1. **coherence (1-10):** Do sections flow logically? Do ideas connect well between sections? Is there a clear thread throughout?
 
 2. **voice_consistency (1-10):** PUNCHY STYLE CONSISTENCY across all sections.
-   - Check if sentence length is consistent throughout (avg should be 10-14 words across all sections)
-   - Verify NO sections drift into formal/academic style (check for long sentences)
-   - Flag any section that has avg > 16 words
+   - Check if sentence length is consistent throughout (avg should be 12-16 words across all sections)
+   - Verify NO sections drift into formal/academic style (check for overly long sentences)
+   - Flag any section that has avg > 18 words
    - Check for consistent conversational tone
    - No jarring shifts in technical level or formality
+   - Ensure complete thoughts, not awkwardly fragmented ideas
 
    **Deduct points if:**
-   - Overall avg > 15 words: Deduct 2 points
-   - Any section significantly longer/shorter than others: Deduct 1 point
+   - Overall avg > 18 words: Deduct 2 points
+   - Any section significantly longer/shorter than others (>4 word avg difference): Deduct 1 point
    - Mix of punchy and formal styles: Deduct 2 points
+   - Choppy fragmented writing that breaks complete thoughts: Deduct 1 point
 
 3. **no_redundancy (1-10):** No repeated information across sections? Each section adds new value without rehashing previous content?
 
