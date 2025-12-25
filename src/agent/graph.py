@@ -6,8 +6,9 @@ This module defines the blog agent graph with:
 - build_blog_agent_graph() to create the compiled graph
 
 Graph structure:
-    topic_discovery → content_landscape_analysis → planning → research →
-    validate_sources → write_section ↓ (loop) → final_assembly → human_review → END
+    topic_discovery → content_landscape_analysis → planning → preview_validation →
+    (conditional: pass → research OR fail → planning) → research → validate_sources →
+    write_section ↓ (loop) → final_assembly → human_review → END
 """
 
 from langgraph.graph import END, StateGraph
@@ -17,12 +18,35 @@ from .nodes import (
     final_assembly_node,
     human_review_node,
     planning_node,
+    preview_validation_node,
     research_node,
     topic_discovery_node,
     validate_sources_node,
     write_section_node,
 )
-from .state import BlogAgentState
+from .state import BlogAgentState, Phase
+
+
+def preview_validation_router(state: BlogAgentState) -> str:
+    """
+    Route after preview_validation_node.
+
+    Returns:
+        "planning" if validation failed (trigger replanning)
+        "research" if validation passed (proceed to research)
+    """
+    current_phase = state.get("current_phase", "")
+
+    # If phase went back to PLANNING, validation failed and we need to replan
+    if current_phase == Phase.PLANNING.value:
+        return "planning"
+
+    # If phase advanced to RESEARCHING, validation passed
+    if current_phase == Phase.RESEARCHING.value:
+        return "research"
+
+    # Default: proceed to research (shouldn't happen but safe fallback)
+    return "research"
 
 
 def section_router(state: BlogAgentState) -> str:
@@ -58,11 +82,12 @@ def review_router(state: BlogAgentState) -> str:
 
 def build_blog_agent_graph() -> StateGraph:
     """
-    Build the blog agent graph with section loop and human review.
+    Build the blog agent graph with preview validation, section loop, and human review.
 
     Graph structure:
-        topic_discovery → content_landscape_analysis → planning → research →
-        validate_sources → write_section ↓ (loop) → final_assembly → human_review → END
+        topic_discovery → content_landscape_analysis → planning → preview_validation →
+        (conditional: pass → research OR fail → planning) → research → validate_sources →
+        write_section ↓ (loop) → final_assembly → human_review → END
 
     Returns:
         Compiled LangGraph StateGraph
@@ -74,6 +99,7 @@ def build_blog_agent_graph() -> StateGraph:
     graph.add_node("topic_discovery", topic_discovery_node)
     graph.add_node("content_landscape_analysis", content_landscape_analysis_node)
     graph.add_node("planning", planning_node)
+    graph.add_node("preview_validation", preview_validation_node)
     graph.add_node("research", research_node)
     graph.add_node("validate_sources", validate_sources_node)
     graph.add_node("write_section", write_section_node)
@@ -86,7 +112,19 @@ def build_blog_agent_graph() -> StateGraph:
     # Linear edges for pipeline
     graph.add_edge("topic_discovery", "content_landscape_analysis")
     graph.add_edge("content_landscape_analysis", "planning")
-    graph.add_edge("planning", "research")
+    graph.add_edge("planning", "preview_validation")
+
+    # Preview validation conditional routing
+    graph.add_conditional_edges(
+        "preview_validation",
+        preview_validation_router,
+        {
+            "planning": "planning",  # Failed validation → replan
+            "research": "research",  # Passed validation → proceed
+        },
+    )
+
+    # Continue pipeline after validation passes
     graph.add_edge("research", "validate_sources")
     graph.add_edge("validate_sources", "write_section")
 

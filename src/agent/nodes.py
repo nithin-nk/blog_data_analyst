@@ -41,9 +41,15 @@ from .state import (
     FinalCriticScore,
     JobManager,
     Phase,
+    PreviewValidationResult,
+    ReplanningFeedback,
     SectionCriticResult,
+    SectionFeasibilityScore,
+    SectionSuggestion,
     SourceValidationList,
     TransitionFix,
+    UniquenessAnalysisResult,
+    UniquenessCheck,
     phase_is_past,
 )
 from .tools import fetch_url_content, search_duckduckgo
@@ -1021,6 +1027,8 @@ def _build_planning_prompt(
     target_words: int,
     topic_snippets: str,
     content_strategy: dict | None = None,
+    replanning_feedback: str | None = None,
+    rejected_sections: list[dict[str, Any]] | None = None,
 ) -> str:
     """
     Build the planning prompt for Gemini.
@@ -1031,10 +1039,91 @@ def _build_planning_prompt(
         target_words: Total target word count
         topic_snippets: Formatted topic context snippets
         content_strategy: ContentStrategy dict from landscape analysis (optional)
+        replanning_feedback: Feedback from preview validation if replanning
+        rejected_sections: Sections that failed validation
 
     Returns:
         Complete prompt string
     """
+    # Build gap mapping section if content_strategy available
+    gap_mapping_section = ""
+    if content_strategy:
+        gaps = content_strategy.get("gaps_to_fill", [])
+        gap_examples = []
+        for gap in gaps[:2]:  # Show 2 examples
+            gap_type = gap.get("gap_type", "")
+            description = gap.get("description", "")
+            gap_examples.append(f'  - gap_type: "{gap_type}"\n    description: "{description}"')
+
+        gap_mapping_section = f"""
+## CRITICAL GAP MAPPING REQUIREMENT
+
+For EACH section in your plan, you MUST:
+1. Set gap_addressed field to one of the gap_types from the content gaps above
+2. Provide gap_justification explaining HOW this section fills that specific gap
+
+Example:
+{{
+  "id": "cache-invalidation",
+  "title": "Cache Invalidation Strategies",
+  "gap_addressed": "missing_edge_cases",
+  "gap_justification": "Existing articles skip invalidation. This section covers TTL strategies, manual invalidation, and consistency patterns."
+}}
+
+**ALL content gaps must be addressed by at least one section.**
+**Sections without proper gap mapping will be REJECTED.**
+"""
+
+    # Build uniqueness verification section
+    uniqueness_section = ""
+    if content_strategy:
+        analyzed_articles = content_strategy.get("analyzed_articles", [])
+        article_summaries = []
+        for article in analyzed_articles[:3]:  # Show top 3
+            title = article.get("title", "Unknown")
+            key_points = article.get("key_points_covered", [])
+            points_str = ", ".join(key_points[:3])
+            article_summaries.append(f"  - {title}: {points_str}")
+
+        uniqueness_section = f"""
+## UNIQUENESS VERIFICATION
+
+Analyzed articles cover these topics:
+{chr(10).join(article_summaries)}
+
+Your sections MUST NOT overlap >70% with these existing articles. Ensure uniqueness by:
+- Taking a different angle or perspective
+- Going deeper into specifics they skip
+- Covering edge cases and production considerations they miss
+- Providing concrete examples and code they don't have
+
+Sections that duplicate existing content will be REJECTED.
+"""
+
+    # Build replanning section if this is a replanning iteration
+    replanning_section = ""
+    if replanning_feedback:
+        rejected_ids = [s.get("id", "") for s in (rejected_sections or [])]
+        rejected_list = ", ".join(rejected_ids) if rejected_ids else "None"
+
+        replanning_section = f"""
+## REPLANNING REQUIRED
+
+Your previous plan failed validation. Issues found:
+
+{replanning_feedback}
+
+**Instructions for replanning:**
+1. Review the feedback above carefully
+2. Replace or improve the rejected sections
+3. Ensure ALL content gaps are properly addressed
+4. Verify new sections have strong information availability
+5. Avoid overlap with analyzed articles (check uniqueness)
+6. Properly set gap_addressed and gap_justification for ALL sections
+
+Rejected section IDs: {rejected_list}
+"""
+
     # Build content strategy section if available
     strategy_section = ""
     if content_strategy:
@@ -1109,6 +1198,8 @@ For each section, provide:
 - title (section heading, null for hook)
 - role (hook/problem/why/implementation/deep_dive/conclusion/tradeoffs)
 - search_queries (2-3 specific queries - prefer "X code example", "X github", "X implementation")
+- gap_addressed (REQUIRED if content_strategy available - which gap_type this section fills)
+- gap_justification (REQUIRED if content_strategy available - explain HOW this section fills the gap)
 - needs_code (true for ALL implementation/deep_dive sections)
 - needs_diagram (true if architecture/flow explanation needed)
 - target_words (distribute {target_words} total across REQUIRED sections only)
@@ -1118,6 +1209,10 @@ For each section, provide:
 - hook, problem/why, conclusion: ALWAYS set optional=false
 - implementation/deep_dive sections: Generate 4-6 total, mark 2 as optional=true
 - tradeoffs section: optional=false if topic has significant drawbacks
+
+{gap_mapping_section}
+{uniqueness_section}
+{replanning_section}
 
 ## Blog Topic
 Title: "{title}"
@@ -1142,6 +1237,8 @@ async def _generate_blog_plan(
     topic_context: list[dict[str, str]],
     key_manager: KeyManager,
     content_strategy: dict | None = None,
+    replanning_feedback: str | None = None,
+    rejected_sections: list[dict[str, Any]] | None = None,
     max_retries: int = 3,
 ) -> BlogPlan:
     """
@@ -1154,6 +1251,8 @@ async def _generate_blog_plan(
         topic_context: List of {title, url, snippet} from discovery
         key_manager: KeyManager for API key rotation
         content_strategy: ContentStrategy dict from landscape analysis (optional)
+        replanning_feedback: Feedback from preview validation if replanning
+        rejected_sections: Sections that failed validation
         max_retries: Maximum retry attempts
 
     Returns:
@@ -1165,9 +1264,10 @@ async def _generate_blog_plan(
     # Format topic snippets
     topic_snippets = _format_topic_context_snippets(topic_context)
 
-    # Build prompt with content strategy
+    # Build prompt with content strategy and replanning context
     prompt = _build_planning_prompt(
-        title, context, target_words, topic_snippets, content_strategy
+        title, context, target_words, topic_snippets, content_strategy,
+        replanning_feedback, rejected_sections
     )
 
     last_error = None
@@ -1255,7 +1355,16 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
 
     node_name = "planning"
     metrics, start_time = _init_node_metrics(state, node_name)
-    logger.info(f"Starting planning for: {state.get('title')}")
+
+    # Get planning iteration (for replanning loop)
+    iteration = state.get("planning_iteration", 0)
+    replanning_feedback = state.get("replanning_feedback", "")
+    rejected_sections = state.get("rejected_sections", [])
+
+    if iteration > 0:
+        logger.info(f"Replanning (iteration {iteration + 1}/3) for: {state.get('title')}")
+    else:
+        logger.info(f"Starting planning for: {state.get('title')}")
 
     title = state.get("title", "")
     context = state.get("context", "")
@@ -1264,11 +1373,16 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
     content_strategy = state.get("content_strategy")
     job_id = state.get("job_id", "")
 
-    # Log content strategy if available
-    if content_strategy:
-        logger.info(f"Using content strategy: unique_angle='{content_strategy.get('unique_angle')}'")
-    else:
-        logger.info("No content strategy available, planning without differentiation context")
+    # CRITICAL: Content strategy is now REQUIRED
+    if not content_strategy:
+        logger.error("Content strategy required - landscape analysis must run first")
+        return {
+            "current_phase": Phase.FAILED.value,
+            "error_message": "Content strategy required. Landscape analysis must run first.",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
+        }
+
+    logger.info(f"Using content strategy: unique_angle='{content_strategy.get('unique_angle')}'")
 
     # Validate required inputs
     if not title:
@@ -1285,7 +1399,7 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
         # Initialize key manager from environment
         key_manager = KeyManager.from_env()
 
-        # Generate blog plan using LLM with content strategy
+        # Generate blog plan using LLM with content strategy and replanning context
         plan = await _generate_blog_plan(
             title=title,
             context=context,
@@ -1293,6 +1407,8 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
             topic_context=topic_context,
             key_manager=key_manager,
             content_strategy=content_strategy,
+            replanning_feedback=replanning_feedback if replanning_feedback else None,
+            rejected_sections=rejected_sections if rejected_sections else None,
         )
 
         # Record LLM call metrics (estimate: ~1500 tokens in, 500 out for plan)
@@ -1310,14 +1426,16 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
             job_manager.save_state(
                 job_id,
                 {
-                    "current_phase": Phase.RESEARCHING.value,
+                    "current_phase": Phase.PREVIEW_VALIDATION.value,
                     "plan": plan_dict,
+                    "planning_iteration": iteration,
                 },
             )
 
         return {
             "plan": plan_dict,
-            "current_phase": Phase.RESEARCHING.value,
+            "current_phase": Phase.PREVIEW_VALIDATION.value,
+            "planning_iteration": iteration,
             "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 
@@ -1333,6 +1451,857 @@ async def planning_node(state: BlogAgentState) -> dict[str, Any]:
         return {
             "current_phase": Phase.FAILED.value,
             "error_message": f"Unexpected error: {e}",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
+        }
+
+
+# =============================================================================
+# Preview Validation Node (Phase 1.5)
+# =============================================================================
+
+
+def _validate_gap_mapping(
+    plan: dict[str, Any], content_strategy: dict[str, Any]
+) -> dict[str, Any]:
+    """
+    Validate that all content gaps are addressed by sections.
+
+    Args:
+        plan: BlogPlan as dict
+        content_strategy: ContentStrategy as dict
+
+    Returns:
+        Dict with validation results
+    """
+    sections = plan.get("sections", [])
+    gaps_to_fill = content_strategy.get("gaps_to_fill", [])
+
+    # Extract gap types from ContentStrategy
+    gap_types = {gap.get("gap_type") for gap in gaps_to_fill}
+
+    # Extract gap types addressed by sections
+    sections_with_gaps = [s for s in sections if s.get("gap_addressed")]
+    addressed_gaps = {s.get("gap_addressed") for s in sections_with_gaps}
+
+    # Find missing gaps
+    missing_gaps = gap_types - addressed_gaps
+
+    # Find sections without gap mapping
+    sections_without_mapping = [
+        s.get("id") for s in sections if not s.get("gap_addressed")
+    ]
+
+    all_gaps_covered = len(missing_gaps) == 0 and len(sections_without_mapping) == 0
+
+    return {
+        "all_gaps_covered": all_gaps_covered,
+        "missing_gaps": list(missing_gaps),
+        "sections_without_mapping": sections_without_mapping,
+        "total_gaps": len(gap_types),
+        "addressed_gaps": len(addressed_gaps),
+    }
+
+
+async def _test_single_section_feasibility(
+    section: dict[str, Any], semaphore: asyncio.Semaphore
+) -> SectionFeasibilityScore:
+    """
+    Test information availability for a single section.
+
+    Args:
+        section: PlanSection as dict
+        semaphore: Semaphore to limit concurrency
+
+    Returns:
+        SectionFeasibilityScore with feasibility assessment
+    """
+    async with semaphore:
+        section_id = section.get("id", "unknown")
+        search_queries = section.get("search_queries", [])
+
+        # Select 1-2 sample queries to test
+        sample_queries = search_queries[:2] if len(search_queries) >= 2 else search_queries
+
+        if not sample_queries:
+            return SectionFeasibilityScore(
+                section_id=section_id,
+                sample_queries_tested=[],
+                sources_found=0,
+                snippet_quality="poor",
+                information_availability=0,
+                is_feasible=False,
+                concerns=["No search queries defined for this section"],
+            )
+
+        # Execute searches
+        all_results = []
+        for query in sample_queries:
+            try:
+                results = await search_duckduckgo(query, max_results=5)
+                all_results.extend(results)
+                await asyncio.sleep(1)  # Rate limiting
+            except Exception as e:
+                logger.warning(f"Search failed for query '{query}': {e}")
+
+        sources_found = len(all_results)
+
+        # Assess snippet quality
+        snippet_quality = _assess_snippet_quality(all_results)
+
+        # Calculate information availability score (0-100)
+        score = 0
+        concerns = []
+
+        if sources_found >= 8 and snippet_quality in ["excellent", "good"]:
+            score = 90
+        elif sources_found >= 5 and snippet_quality in ["excellent", "good"]:
+            score = 75
+        elif sources_found >= 3 and snippet_quality in ["good", "weak"]:
+            score = 60
+        elif sources_found >= 3:
+            score = 50
+            concerns.append(f"Found {sources_found} sources but snippet quality is {snippet_quality}")
+        else:
+            score = max(20, sources_found * 10)
+            concerns.append(f"Only {sources_found} sources found (need 3+)")
+
+        is_feasible = score >= 60
+
+        if not is_feasible and not concerns:
+            concerns.append(f"Information availability score {score} below threshold 60")
+
+        return SectionFeasibilityScore(
+            section_id=section_id,
+            sample_queries_tested=sample_queries,
+            sources_found=sources_found,
+            snippet_quality=snippet_quality,
+            information_availability=score,
+            is_feasible=is_feasible,
+            concerns=concerns,
+        )
+
+
+def _assess_snippet_quality(results: list[dict[str, str]]) -> str:
+    """
+    Assess quality of search result snippets.
+
+    Args:
+        results: List of search results with 'snippet' field
+
+    Returns:
+        Quality rating: "excellent" | "good" | "weak" | "poor"
+    """
+    if not results:
+        return "poor"
+
+    snippets = [r.get("snippet", "") for r in results]
+    avg_length = sum(len(s) for s in snippets) / len(snippets)
+
+    # Count technical indicators (code, numbers, specific terms)
+    technical_indicators = 0
+    for snippet in snippets:
+        if any(
+            indicator in snippet.lower()
+            for indicator in ["code", "example", "implementation", "function", "class", "api"]
+        ):
+            technical_indicators += 1
+
+    technical_ratio = technical_indicators / len(snippets) if snippets else 0
+
+    # Quality assessment
+    if avg_length > 150 and technical_ratio >= 0.5:
+        return "excellent"
+    elif avg_length > 100 and technical_ratio >= 0.3:
+        return "good"
+    elif avg_length > 50:
+        return "weak"
+    else:
+        return "poor"
+
+
+async def _test_section_feasibility_parallel(
+    sections: list[dict[str, Any]], max_concurrent: int = 3
+) -> list[SectionFeasibilityScore]:
+    """
+    Test feasibility of all sections in parallel.
+
+    Args:
+        sections: List of PlanSection dicts
+        max_concurrent: Maximum concurrent searches
+
+    Returns:
+        List of SectionFeasibilityScore results
+    """
+    semaphore = asyncio.Semaphore(max_concurrent)
+    tasks = [_test_single_section_feasibility(section, semaphore) for section in sections]
+    return await asyncio.gather(*tasks)
+
+
+def _build_uniqueness_prompt(
+    sections: list[dict[str, Any]], content_strategy: dict[str, Any]
+) -> str:
+    """
+    Build prompt for LLM-based uniqueness checking.
+
+    Args:
+        sections: List of PlanSection dicts
+        content_strategy: ContentStrategy dict with analyzed_articles
+
+    Returns:
+        Formatted prompt string
+    """
+    analyzed_articles = content_strategy.get("analyzed_articles", [])
+
+    # Format sections
+    sections_text = []
+    for section in sections:
+        sections_text.append(f"""
+**Section ID**: {section.get('id', 'unknown')}
+**Title**: {section.get('title', 'N/A')}
+**Role**: {section.get('role', 'N/A')}
+**Gap Addressed**: {section.get('gap_addressed', 'N/A')}
+**Gap Justification**: {section.get('gap_justification', 'N/A')}
+**Search Queries**: {', '.join(section.get('search_queries', []))}
+""")
+
+    # Format analyzed articles
+    articles_text = []
+    for article in analyzed_articles:
+        key_points = "\n  - ".join(article.get("key_points_covered", []))
+        strengths = "\n  - ".join(article.get("strengths", []))
+        weaknesses = "\n  - ".join(article.get("weaknesses", []))
+
+        articles_text.append(f"""
+**Article**: {article.get('title', 'Unknown')}
+**URL**: {article.get('url', 'N/A')}
+**Main Angle**: {article.get('main_angle', 'N/A')}
+**Key Points Covered**:
+  - {key_points}
+**Strengths**:
+  - {strengths}
+**Weaknesses**:
+  - {weaknesses}
+""")
+
+    return f"""You are a technical content analyst evaluating a blog plan for uniqueness.
+
+## TASK
+Analyze each planned section and determine if it overlaps >70% with existing articles.
+
+## PLANNED SECTIONS
+{chr(10).join(sections_text)}
+
+## ANALYZED EXISTING ARTICLES
+{chr(10).join(articles_text)}
+
+## EVALUATION CRITERIA
+
+For each section, determine overlap percentage (0-100):
+- **0-30%**: Completely unique angle or topic
+- **31-50%**: Related but different focus
+- **51-70%**: Similar but adds new perspective (ACCEPTABLE)
+- **71-100%**: Substantive overlap, appears to rehash existing content (REJECT)
+
+Consider:
+- Is the section covering the same specific topic/technique as an existing article?
+- Is the angle substantively different from what existing articles cover?
+- Does it add genuinely new information or just restate existing content?
+- **Topical similarity is OK** if the approach/perspective is genuinely different
+- Focus on **substantive overlap**, not just shared keywords
+
+For each section, identify:
+1. overlap_percentage (0-100)
+2. is_unique (true if <=70%, false if >70%)
+3. overlapping_articles (list of URLs with high overlap)
+4. concerns (what content is being rehashed, if applicable)
+
+Provide an overall_assessment summarizing uniqueness across all sections.
+
+Output structured UniquenessAnalysisResult."""
+
+
+async def _check_sections_uniqueness_llm(
+    sections: list[dict[str, Any]],
+    content_strategy: dict[str, Any],
+    key_manager: KeyManager,
+    max_retries: int = 3,
+) -> UniquenessAnalysisResult:
+    """
+    LLM-based uniqueness checking using Gemini Flash.
+
+    Args:
+        sections: List of PlanSection dicts
+        content_strategy: ContentStrategy dict with analyzed_articles
+        key_manager: KeyManager for API key rotation
+        max_retries: Maximum retry attempts
+
+    Returns:
+        UniquenessAnalysisResult with uniqueness checks for all sections
+    """
+    prompt = _build_uniqueness_prompt(sections, content_strategy)
+
+    last_error = None
+
+    for attempt in range(max_retries):
+        api_key = key_manager.get_best_key()
+
+        try:
+            # Initialize LLM with structured output
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-2.5-flash",
+                google_api_key=api_key,
+                temperature=0.3,  # Lower temp for consistent evaluation
+            )
+
+            structured_llm = llm.with_structured_output(UniquenessAnalysisResult)
+
+            # Invoke
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, lambda: structured_llm.invoke(prompt)
+            )
+
+            # Record usage
+            key_manager.record_usage(
+                api_key,
+                tokens_in=len(prompt) // 4,
+                tokens_out=500,
+            )
+
+            logger.info(f"LLM uniqueness check complete: {len(result.uniqueness_checks)} sections analyzed")
+            return result
+
+        except Exception as e:
+            error_str = str(e).lower()
+            last_error = e
+
+            # Check for rate limit
+            if "429" in str(e) or "quota" in error_str or "resource" in error_str:
+                logger.warning("Rate limited on key, rotating...")
+                key_manager.mark_rate_limited(api_key)
+
+                next_key = key_manager.get_next_key(api_key)
+                if next_key is None:
+                    raise RuntimeError("All API keys exhausted or rate-limited")
+                continue
+
+            # For other errors, retry with backoff
+            logger.error(f"Uniqueness check attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2**attempt)
+
+    raise RuntimeError(
+        f"Failed to check uniqueness after {max_retries} attempts: {last_error}"
+    )
+
+
+def _build_replanning_feedback_prompt(
+    plan: dict[str, Any],
+    content_strategy: dict[str, Any],
+    gap_validation: dict[str, Any] | None = None,
+    weak_sections: list[SectionFeasibilityScore] | None = None,
+    non_unique_sections: list[UniquenessCheck] | None = None,
+) -> str:
+    """
+    Build prompt for LLM to generate concrete replanning feedback.
+
+    Args:
+        plan: Original blog plan with sections
+        content_strategy: Content strategy with gaps and analyzed articles
+        gap_validation: Gap mapping validation results
+        weak_sections: Sections with low feasibility scores
+        non_unique_sections: Sections with high overlap
+
+    Returns:
+        Formatted prompt string for LLM
+    """
+    sections = plan.get("sections", [])
+    gaps = content_strategy.get("gaps", [])
+
+    prompt_parts = [
+        "You are a blog planning validator. A blog plan has been created but some sections failed validation.",
+        "Your task is to provide CONCRETE, ACTIONABLE suggestions to fix each rejected section.",
+        "",
+        "## Original Blog Plan",
+        f"**Topic**: {plan.get('topic', 'Unknown')}",
+        f"**Target Length**: {plan.get('target_length', 'medium')}",
+        f"**Total Sections**: {len(sections)}",
+        "",
+        "## Content Strategy Gaps to Address",
+        "These are the unique angles/gaps we identified from analyzing existing articles:",
+    ]
+
+    for i, gap in enumerate(gaps, 1):
+        prompt_parts.append(f"{i}. **{gap.get('gap', 'Unknown')}**: {gap.get('description', '')}")
+
+    prompt_parts.extend(
+        [
+            "",
+            "## Validation Failures",
+            "",
+        ]
+    )
+
+    # Gap mapping issues
+    if gap_validation and not gap_validation.get("all_gaps_covered"):
+        missing_gaps = gap_validation.get("missing_gaps", [])
+        sections_without_mapping = gap_validation.get("sections_without_mapping", [])
+
+        if missing_gaps:
+            prompt_parts.extend(
+                [
+                    "### Gap Mapping Issues",
+                    f"**Missing Gaps**: {', '.join(missing_gaps)}",
+                    "These content gaps are not addressed by any section in the plan.",
+                    "",
+                ]
+            )
+
+        if sections_without_mapping:
+            prompt_parts.extend(
+                [
+                    f"**Sections Without Gap Mapping**: {', '.join(sections_without_mapping)}",
+                    "These sections don't map to any identified gap.",
+                    "",
+                ]
+            )
+
+    # Weak sections
+    if weak_sections:
+        prompt_parts.extend(
+            [
+                "### Weak Sections (Low Information Availability)",
+                "These sections have insufficient information available online:",
+                "",
+            ]
+        )
+
+        for score in weak_sections:
+            section_info = next((s for s in sections if s.get("id") == score.section_id), {})
+            prompt_parts.extend(
+                [
+                    f"**Section ID**: {score.section_id}",
+                    f"**Title**: {section_info.get('title', 'Unknown')}",
+                    f"**Role**: {section_info.get('role', 'Unknown')}",
+                    f"**Information Score**: {score.information_availability}/100",
+                    f"**Concerns**: {'; '.join(score.concerns)}",
+                    f"**Search Queries Tried**: {', '.join(section_info.get('search_queries', []))}",
+                    "",
+                ]
+            )
+
+    # Non-unique sections
+    if non_unique_sections:
+        prompt_parts.extend(
+            [
+                "### Non-Unique Sections (High Overlap with Existing Articles)",
+                "These sections are too similar to content that already exists:",
+                "",
+            ]
+        )
+
+        for check in non_unique_sections:
+            section_info = next((s for s in sections if s.get("id") == check.section_id), {})
+            prompt_parts.extend(
+                [
+                    f"**Section ID**: {check.section_id}",
+                    f"**Title**: {section_info.get('title', 'Unknown')}",
+                    f"**Overlap**: {check.overlap_percentage:.1f}%",
+                    f"**Concerns**: {check.concerns}",
+                    "",
+                ]
+            )
+
+    prompt_parts.extend(
+        [
+            "## Your Task",
+            "",
+            "For EACH rejected section, provide:",
+            "1. **Issue**: Clear explanation of why it was rejected",
+            "2. **Suggested Title**: Alternative section title that addresses a different angle",
+            "3. **Suggested Angle**: Specific approach to take (e.g., 'Focus on X instead of Y')",
+            "4. **Alternative Gap** (optional): If the section can't be salvaged, suggest a different gap to address",
+            "",
+            "Make your suggestions CONCRETE and SPECIFIC:",
+            "- ❌ BAD: 'Make it more unique'",
+            "- ✅ GOOD: 'Instead of \"Caching Basics\", try \"When NOT to Use Caching\" (addresses the tradeoffs gap)'",
+            "",
+            "Also provide:",
+            "- **Summary**: High-level overview of all issues (2-3 sentences)",
+            "- **General Guidance**: Overall advice for replanning (focus on what to avoid, what to prioritize)",
+            "",
+            "Return structured output with:",
+            "- summary: string",
+            "- section_suggestions: list of {section_id, issue, suggested_title, suggested_angle, alternative_gap}",
+            "- general_guidance: string",
+        ]
+    )
+
+    return "\n".join(prompt_parts)
+
+
+async def _generate_replanning_feedback_llm(
+    plan: dict[str, Any],
+    content_strategy: dict[str, Any],
+    key_manager: KeyManager,
+    gap_validation: dict[str, Any] | None = None,
+    weak_sections: list[SectionFeasibilityScore] | None = None,
+    non_unique_sections: list[UniquenessCheck] | None = None,
+    max_retries: int = 3,
+) -> ReplanningFeedback:
+    """
+    Generate concrete replanning feedback using LLM.
+
+    Uses Gemini Flash to analyze validation failures and provide specific,
+    actionable suggestions for improving each rejected section.
+
+    Args:
+        plan: Original blog plan
+        content_strategy: Content strategy with gaps
+        key_manager: API key manager
+        gap_validation: Gap mapping validation results
+        weak_sections: Sections with low feasibility
+        non_unique_sections: Sections with high overlap
+        max_retries: Maximum retry attempts
+
+    Returns:
+        ReplanningFeedback object with concrete suggestions
+
+    Raises:
+        RuntimeError: If all retries fail
+    """
+    prompt = _build_replanning_feedback_prompt(
+        plan, content_strategy, gap_validation, weak_sections, non_unique_sections
+    )
+
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            api_key = key_manager.get_key()
+
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-2.5-flash",
+                google_api_key=api_key,
+                temperature=0.3,  # Low temp for consistent, structured feedback
+            )
+
+            structured_llm = llm.with_structured_output(ReplanningFeedback)
+
+            logger.info(
+                f"Generating replanning feedback via LLM (attempt {attempt + 1}/{max_retries})..."
+            )
+            result = await structured_llm.ainvoke(prompt)
+
+            # Track usage
+            key_manager.track_usage(api_key, input_tokens=len(prompt) // 4, output_tokens=500)
+
+            logger.info(f"✓ Generated feedback with {len(result.section_suggestions)} suggestions")
+            return result
+
+        except Exception as e:
+            last_error = e
+            error_msg = str(e).lower()
+
+            # Handle rate limiting
+            if "429" in error_msg or "resource_exhausted" in error_msg:
+                logger.warning(f"Rate limit hit, rotating key (attempt {attempt + 1})")
+                key_manager.mark_rate_limited(api_key)
+
+            logger.error(f"Attempt {attempt + 1} failed: {e}")
+
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2**attempt)
+
+    raise RuntimeError(
+        f"Failed to generate replanning feedback after {max_retries} attempts: {last_error}"
+    )
+
+
+def _build_replanning_feedback(
+    gap_validation: dict[str, Any] | None = None,
+    weak_sections: list[SectionFeasibilityScore] | None = None,
+    non_unique_sections: list[UniquenessCheck] | None = None,
+) -> str:
+    """
+    Build feedback message for replanning.
+
+    Args:
+        gap_validation: Gap mapping validation results
+        weak_sections: Sections with low feasibility scores
+        non_unique_sections: Sections with high overlap
+
+    Returns:
+        Formatted feedback string
+    """
+    feedback_parts = []
+
+    # Gap mapping issues
+    if gap_validation and not gap_validation.get("all_gaps_covered"):
+        missing_gaps = gap_validation.get("missing_gaps", [])
+        sections_without_mapping = gap_validation.get("sections_without_mapping", [])
+
+        if missing_gaps:
+            feedback_parts.append(
+                f"**Missing Content Gaps**: The following gaps are not addressed by any section: {', '.join(missing_gaps)}"
+            )
+
+        if sections_without_mapping:
+            feedback_parts.append(
+                f"**Sections Without Gap Mapping**: The following sections don't map to any gap: {', '.join(sections_without_mapping)}"
+            )
+
+    # Weak sections (low information availability)
+    if weak_sections:
+        feedback_parts.append("**Weak Sections (Low Information Availability)**:")
+        for score in weak_sections:
+            concerns_str = "; ".join(score.concerns)
+            feedback_parts.append(
+                f"  - {score.section_id}: Score {score.information_availability}/100. {concerns_str}"
+            )
+
+    # Non-unique sections
+    if non_unique_sections:
+        feedback_parts.append("**Non-Unique Sections (High Overlap with Existing Articles)**:")
+        for check in non_unique_sections:
+            feedback_parts.append(
+                f"  - {check.section_id}: {check.overlap_percentage:.1f}% overlap. {check.concerns}"
+            )
+
+    return "\n\n".join(feedback_parts)
+
+
+async def _trigger_replanning(
+    reason: str,
+    iteration: int,
+    plan: dict[str, Any],
+    content_strategy: dict[str, Any],
+    key_manager: KeyManager,
+    gap_validation: dict[str, Any] | None = None,
+    weak_sections: list[SectionFeasibilityScore] | None = None,
+    non_unique_sections: list[UniquenessCheck] | None = None,
+) -> dict[str, Any]:
+    """
+    Trigger replanning by returning to PLANNING phase with LLM-generated feedback.
+
+    Args:
+        reason: Reason for replanning
+        iteration: Current planning iteration
+        plan: Original blog plan
+        content_strategy: Content strategy with gaps
+        key_manager: API key manager
+        gap_validation: Gap validation results
+        weak_sections: Weak sections
+        non_unique_sections: Non-unique sections
+
+    Returns:
+        State update dict to trigger replanning
+    """
+    # Generate concrete feedback using LLM
+    try:
+        feedback_obj = await _generate_replanning_feedback_llm(
+            plan, content_strategy, key_manager, gap_validation, weak_sections, non_unique_sections
+        )
+
+        # Format feedback as string for state
+        feedback_parts = [
+            f"## {feedback_obj.summary}",
+            "",
+            "## Specific Suggestions",
+            "",
+        ]
+
+        for suggestion in feedback_obj.section_suggestions:
+            feedback_parts.extend(
+                [
+                    f"### Section: {suggestion.section_id}",
+                    f"**Issue**: {suggestion.issue}",
+                    f"**Suggested Title**: {suggestion.suggested_title}",
+                    f"**Suggested Angle**: {suggestion.suggested_angle}",
+                ]
+            )
+            if suggestion.alternative_gap:
+                feedback_parts.append(f"**Alternative Gap**: {suggestion.alternative_gap}")
+            feedback_parts.append("")
+
+        feedback_parts.extend(
+            [
+                "## General Guidance",
+                feedback_obj.general_guidance,
+            ]
+        )
+
+        feedback = "\n".join(feedback_parts)
+
+    except Exception as e:
+        logger.error(f"LLM feedback generation failed: {e}. Falling back to static feedback.")
+        # Fallback to static method if LLM fails
+        feedback = _build_replanning_feedback(gap_validation, weak_sections, non_unique_sections)
+
+    rejected_section_ids = []
+    if weak_sections:
+        rejected_section_ids.extend([s.section_id for s in weak_sections])
+    if non_unique_sections:
+        rejected_section_ids.extend([s.section_id for s in non_unique_sections])
+
+    return {
+        "current_phase": Phase.PLANNING.value,
+        "planning_iteration": iteration + 1,
+        "replanning_feedback": feedback,
+        "rejected_sections": [{"id": sid, "reason": reason} for sid in rejected_section_ids],
+    }
+
+
+async def preview_validation_node(state: BlogAgentState) -> dict[str, Any]:
+    """
+    Phase 1.5: Preview Validation Node.
+
+    Validates planned sections before research:
+    1. Gap mapping completeness
+    2. Information availability (test sample queries)
+    3. Uniqueness vs analyzed articles
+    4. Decision: proceed OR trigger replanning (max 3 iterations)
+
+    Args:
+        state: Current blog agent state
+
+    Returns:
+        State updates
+    """
+    node_name = "preview_validation"
+    metrics, start_time = _init_node_metrics(state, node_name)
+
+    logger.info("Starting preview validation")
+
+    # Skip if already past this phase
+    if phase_is_past(state.get("current_phase", ""), Phase.PREVIEW_VALIDATION):
+        logger.info("Skipping preview validation (already past this phase)")
+        return {"metrics": _finalize_node_metrics(metrics, node_name, start_time)}
+
+    # Get state
+    plan = state.get("plan")
+    content_strategy = state.get("content_strategy")
+    iteration = state.get("planning_iteration", 0)
+    key_manager = state.get("key_manager")
+
+    if not plan:
+        logger.error("No plan found in state")
+        return {
+            "current_phase": Phase.FAILED.value,
+            "error_message": "No plan found for preview validation",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
+        }
+
+    if not content_strategy:
+        logger.error("No content strategy found - landscape analysis required")
+        return {
+            "current_phase": Phase.FAILED.value,
+            "error_message": "Content strategy required. Landscape analysis must run first.",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
+        }
+
+    if not key_manager:
+        logger.error("No key manager found in state")
+        return {
+            "current_phase": Phase.FAILED.value,
+            "error_message": "Key manager required for LLM validation",
+            "metrics": _finalize_node_metrics(metrics, node_name, start_time),
+        }
+
+    sections = plan.get("sections", [])
+    logger.info(f"Validating {len(sections)} sections (iteration {iteration + 1}/3)")
+
+    try:
+        # Step 1: Validate gap mapping
+        logger.info("Validating gap mapping...")
+        gap_validation = _validate_gap_mapping(plan, content_strategy)
+
+        if not gap_validation["all_gaps_covered"]:
+            logger.warning(
+                f"Gap mapping incomplete: {gap_validation['missing_gaps']} gaps not addressed"
+            )
+            return await _trigger_replanning(
+                reason="gap_mapping_incomplete",
+                iteration=iteration,
+                plan=plan,
+                content_strategy=content_strategy,
+                key_manager=key_manager,
+                gap_validation=gap_validation,
+            )
+
+        logger.info("✓ Gap mapping complete")
+
+        # Step 2: Test information availability (parallel)
+        logger.info("Testing information availability for sections...")
+        feasibility_scores = await _test_section_feasibility_parallel(sections)
+
+        # Step 3: Check uniqueness using LLM
+        logger.info("Checking section uniqueness via LLM...")
+        uniqueness_result = await _check_sections_uniqueness_llm(
+            sections, content_strategy, key_manager
+        )
+        uniqueness_checks = uniqueness_result.uniqueness_checks
+
+        # Step 4: Decision
+        weak_sections = [s for s in feasibility_scores if not s.is_feasible]
+        non_unique = [c for c in uniqueness_checks if not c.is_unique]
+
+        logger.info(f"Weak sections: {len(weak_sections)}, Non-unique: {len(non_unique)}")
+
+        # All sections pass
+        if len(weak_sections) == 0 and len(non_unique) == 0:
+            logger.info("✓ All sections passed preview validation")
+
+            # Convert to dicts for state
+            validation_result = PreviewValidationResult(
+                section_scores=feasibility_scores,
+                weak_sections=[],
+                all_sections_pass=True,
+                recommendation="proceed",
+                feedback_for_replanning="",
+            )
+
+            return {
+                "current_phase": Phase.RESEARCHING.value,
+                "preview_validation_result": validation_result.model_dump(),
+                "uniqueness_checks": [c.model_dump() for c in uniqueness_checks],
+                "metrics": _finalize_node_metrics(metrics, node_name, start_time),
+            }
+
+        # Some sections failed - check iteration limit
+        if iteration >= 2:
+            logger.error(f"Max iterations (3) reached. Cannot create viable plan.")
+            return {
+                "current_phase": Phase.FAILED.value,
+                "error_message": "Cannot create viable plan after 3 attempts. Please review and manually edit plan.json.",
+                "preview_validation_result": {
+                    "section_scores": [s.model_dump() for s in feasibility_scores],
+                    "weak_sections": [s.section_id for s in weak_sections],
+                    "all_sections_pass": False,
+                    "recommendation": "manual_intervention",
+                    "feedback_for_replanning": _build_replanning_feedback(
+                        None, weak_sections, non_unique
+                    ),
+                },
+                "metrics": _finalize_node_metrics(metrics, node_name, start_time),
+            }
+
+        # Trigger replanning
+        logger.warning(f"Preview validation failed. Triggering replanning (attempt {iteration + 2}/3)")
+        return await _trigger_replanning(
+            reason="sections_failed_validation",
+            iteration=iteration,
+            plan=plan,
+            content_strategy=content_strategy,
+            key_manager=key_manager,
+            weak_sections=weak_sections,
+            non_unique_sections=non_unique,
+        )
+
+    except Exception as e:
+        logger.error(f"Preview validation failed: {e}")
+        return {
+            "current_phase": Phase.FAILED.value,
+            "error_message": f"Preview validation error: {e}",
             "metrics": _finalize_node_metrics(metrics, node_name, start_time),
         }
 

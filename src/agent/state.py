@@ -28,13 +28,15 @@ class Phase(str, Enum):
     Current phase of the blog agent pipeline.
 
     State flow:
-    topic_discovery → planning → researching → validating_sources →
-    writing → reviewing → assembling → final_review → done | failed
+    topic_discovery → content_landscape → planning → preview_validation →
+    researching → validating_sources → writing → reviewing → assembling →
+    final_review → done | failed
     """
 
     TOPIC_DISCOVERY = "topic_discovery"
     CONTENT_LANDSCAPE = "content_landscape"
     PLANNING = "planning"
+    PREVIEW_VALIDATION = "preview_validation"
     RESEARCHING = "researching"
     VALIDATING_SOURCES = "validating_sources"
     WRITING = "writing"
@@ -50,6 +52,7 @@ PHASE_ORDER = [
     Phase.TOPIC_DISCOVERY,
     Phase.CONTENT_LANDSCAPE,
     Phase.PLANNING,
+    Phase.PREVIEW_VALIDATION,
     Phase.RESEARCHING,
     Phase.VALIDATING_SOURCES,
     Phase.WRITING,
@@ -117,6 +120,13 @@ class BlogAgentState(TypedDict, total=False):
     # === Phase 1: Planning ===
     plan: dict[str, Any]  # BlogPlan as dict
 
+    # === Phase 1.5: Preview Validation ===
+    preview_validation_result: dict[str, Any] | None  # PreviewValidationResult as dict
+    planning_iteration: int  # Track replanning attempts (0-2)
+    rejected_sections: list[dict[str, Any]]  # Sections that failed validation
+    uniqueness_checks: list[dict[str, Any]]  # UniquenessCheck results
+    replanning_feedback: str  # Feedback for replanning
+
     # === Phase 2: Research ===
     research_cache: dict[str, dict[str, Any]]  # url_hash -> content
 
@@ -174,6 +184,14 @@ class PlanSection(BaseModel):
     search_queries: list[str] = Field(
         default_factory=list,
         description="2-3 specific queries for research",
+    )
+    gap_addressed: str | None = Field(
+        default=None,
+        description="Which content gap this section addresses (gap_type from ContentStrategy)",
+    )
+    gap_justification: str = Field(
+        default="",
+        description="How this section fills the identified gap",
     )
     needs_code: bool = Field(default=False, description="Whether section needs code examples")
     needs_diagram: bool = Field(
@@ -361,6 +379,100 @@ class ContentStrategy(BaseModel):
     differentiation_requirements: list[str] = Field(
         description="Specific requirements to ensure uniqueness (e.g., 'must include benchmarks')"
     )
+
+
+# =============================================================================
+# Preview Validation Models (Phase 1.5)
+# =============================================================================
+
+
+class SectionFeasibilityScore(BaseModel):
+    """Feasibility assessment for a planned section."""
+
+    section_id: str = Field(description="Section identifier")
+    sample_queries_tested: list[str] = Field(
+        description="1-2 queries actually executed for this section"
+    )
+    sources_found: int = Field(description="Number of sources found")
+    snippet_quality: str = Field(
+        description="Quality assessment: excellent | good | weak | poor"
+    )
+    information_availability: int = Field(
+        ge=0, le=100, description="Score 0-100 indicating information availability"
+    )
+    is_feasible: bool = Field(
+        description="True if score >= 60 (passing threshold)"
+    )
+    concerns: list[str] = Field(
+        default_factory=list, description="Issues if score < 60"
+    )
+
+
+class PreviewValidationResult(BaseModel):
+    """Results from preview validation phase."""
+
+    section_scores: list[SectionFeasibilityScore] = Field(
+        description="Feasibility scores for all sections"
+    )
+    weak_sections: list[str] = Field(
+        default_factory=list, description="Section IDs with score < 60"
+    )
+    all_sections_pass: bool = Field(description="True if all sections are feasible")
+    recommendation: str = Field(
+        description="proceed | revise_weak_sections | regenerate_plan"
+    )
+    feedback_for_replanning: str = Field(
+        default="", description="Feedback to guide replanning if needed"
+    )
+
+
+class UniquenessCheck(BaseModel):
+    """Uniqueness verification against analyzed articles."""
+
+    section_id: str = Field(description="Section identifier")
+    section_title: str = Field(description="Section title")
+    overlap_percentage: float = Field(
+        ge=0.0, le=100.0, description="Overlap percentage 0-100"
+    )
+    overlapping_articles: list[str] = Field(
+        default_factory=list, description="URLs with high overlap"
+    )
+    is_unique: bool = Field(description="True if overlap <= 70%")
+    concerns: str = Field(default="", description="What content is being rehashed")
+
+
+class UniquenessAnalysisResult(BaseModel):
+    """LLM-generated uniqueness analysis for all sections."""
+
+    uniqueness_checks: list[UniquenessCheck] = Field(
+        description="Uniqueness check for each section"
+    )
+    overall_assessment: str = Field(
+        description="Summary of uniqueness issues across all sections"
+    )
+
+
+class SectionSuggestion(BaseModel):
+    """Concrete suggestion for improving a rejected section."""
+
+    section_id: str = Field(description="Section ID that was rejected")
+    issue: str = Field(description="Why this section was rejected")
+    suggested_title: str = Field(description="Alternative section title")
+    suggested_angle: str = Field(description="Different approach to take")
+    alternative_gap: str | None = Field(
+        default=None,
+        description="Different gap to address (optional)",
+    )
+
+
+class ReplanningFeedback(BaseModel):
+    """LLM-generated replanning feedback with concrete suggestions."""
+
+    summary: str = Field(description="High-level summary of all issues")
+    section_suggestions: list[SectionSuggestion] = Field(
+        description="Concrete suggestions for each rejected section"
+    )
+    general_guidance: str = Field(description="Overall advice for replanning")
 
 
 # =============================================================================
