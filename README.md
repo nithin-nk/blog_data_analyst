@@ -338,7 +338,6 @@ PYTHONPATH=. pytest -k "test_search"
 
 1. Read the documentation:
    - [design.md](design.md) - Complete architecture specification
-   - [CLAUDE.md](CLAUDE.md) - Guidance for AI assistants
 
 2. Follow existing patterns:
    - Match the code style in the codebase
@@ -359,7 +358,6 @@ PYTHONPATH=. pytest -k "test_search"
 ## Documentation
 
 - **[design.md](design.md)** - Complete technical specification, prompts, state machine diagrams
-- **[CLAUDE.md](CLAUDE.md)** - Guidance for AI assistants working with this codebase
 
 ## Examples
 
