@@ -333,14 +333,11 @@ PYTHONPATH=. pytest -k "test_search"
 **Vertical Slice Approach**
 - Build thin slices across all layers first, then add depth
 - Each slice produces testable, working functionality
-- See [VERTICAL_SLICE_PLAN.md](VERTICAL_SLICE_PLAN.md) for implementation status
 
 ### Contributing
 
 1. Read the documentation:
    - [design.md](design.md) - Complete architecture specification
-   - [VERTICAL_SLICE_PLAN.md](VERTICAL_SLICE_PLAN.md) - Implementation strategy and current status
-   - [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) - Detailed roadmap
    - [CLAUDE.md](CLAUDE.md) - Guidance for AI assistants
 
 2. Follow existing patterns:
@@ -362,8 +359,6 @@ PYTHONPATH=. pytest -k "test_search"
 ## Documentation
 
 - **[design.md](design.md)** - Complete technical specification, prompts, state machine diagrams
-- **[VERTICAL_SLICE_PLAN.md](VERTICAL_SLICE_PLAN.md)** - Vertical slice implementation strategy, current status
-- **[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)** - Detailed implementation phases and modules
 - **[CLAUDE.md](CLAUDE.md)** - Guidance for AI assistants working with this codebase
 
 ## Examples
