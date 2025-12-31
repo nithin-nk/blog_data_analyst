@@ -1,0 +1,822 @@
+"""
+State module - State schema, Pydantic models, and job management.
+
+This module defines:
+- Phase enum for pipeline states
+- BlogAgentState TypedDict for LangGraph
+- Pydantic models for structured LLM outputs
+- JobManager for checkpoint/resume functionality
+"""
+
+import json
+import re
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Any, TypedDict
+
+from pydantic import BaseModel, Field
+
+
+# =============================================================================
+# Phase Enum
+# =============================================================================
+
+
+class Phase(str, Enum):
+    """
+    Current phase of the blog agent pipeline.
+
+    State flow:
+    topic_discovery → content_landscape → planning → preview_validation →
+    section_selection → researching → validating_sources → writing → reviewing →
+    assembling → final_review → done | failed
+    """
+
+    TOPIC_DISCOVERY = "topic_discovery"
+    CONTENT_LANDSCAPE = "content_landscape"
+    PLANNING = "planning"
+    PREVIEW_VALIDATION = "preview_validation"
+    SECTION_SELECTION = "section_selection"
+    RESEARCHING = "researching"
+    VALIDATING_SOURCES = "validating_sources"
+    WRITING = "writing"
+    REVIEWING = "reviewing"
+    ASSEMBLING = "assembling"
+    FINAL_REVIEW = "final_review"
+    DONE = "done"
+    FAILED = "failed"
+
+
+# Phase ordering for resumption logic (excludes FAILED which is a terminal state)
+PHASE_ORDER = [
+    Phase.TOPIC_DISCOVERY,
+    Phase.CONTENT_LANDSCAPE,
+    Phase.PLANNING,
+    Phase.PREVIEW_VALIDATION,
+    Phase.SECTION_SELECTION,
+    Phase.RESEARCHING,
+    Phase.VALIDATING_SOURCES,
+    Phase.WRITING,
+    Phase.ASSEMBLING,
+    Phase.REVIEWING,
+    Phase.DONE,
+]
+
+
+def phase_is_past(current_phase: str, check_phase: Phase) -> bool:
+    """
+    Return True if current_phase is past check_phase (node should skip).
+
+    Used for resumption: if the saved phase is past a node's phase,
+    that node should skip execution.
+
+    Args:
+        current_phase: The current phase string from state
+        check_phase: The phase to check against
+
+    Returns:
+        True if current_phase > check_phase in the pipeline order
+    """
+    if not current_phase:
+        return False
+    try:
+        current_idx = PHASE_ORDER.index(Phase(current_phase))
+        check_idx = PHASE_ORDER.index(check_phase)
+        return current_idx > check_idx
+    except (ValueError, KeyError):
+        return False
+
+
+# =============================================================================
+# BlogAgentState (TypedDict for LangGraph)
+# =============================================================================
+
+
+class BlogAgentState(TypedDict, total=False):
+    """
+    LangGraph state for the blog agent.
+
+    All data flows through this state between nodes.
+    Designed to be JSON-serializable for checkpointing.
+    """
+
+    # === Input (set at start) ===
+    job_id: str
+    title: str
+    context: str
+    target_length: str  # "short" | "medium" | "long"
+    flags: dict[str, bool]  # review_sections, review_final, no_citations, etc.
+
+    # === Runtime (not serialized) ===
+    key_manager: Any  # KeyManager instance for API key rotation (runtime only, not saved to disk)
+
+    # === Phase Tracking ===
+    current_phase: str  # Phase enum value
+    current_section_index: int
+
+    # === Phase 0.5: Topic Discovery ===
+    discovery_queries: list[str]
+    topic_context: list[dict[str, str]]  # [{title, url, snippet}]
+
+    # === Phase 0.6: Content Landscape Analysis ===
+    content_strategy: dict[str, Any] | None  # ContentStrategy as dict
+
+    # === Phase 1: Planning ===
+    plan: dict[str, Any]  # BlogPlan as dict
+
+    # === Phase 1.5: Preview Validation ===
+    preview_validation_result: dict[str, Any] | None  # PreviewValidationResult as dict
+    planning_iteration: int  # Track replanning attempts (0-2)
+    rejected_sections: list[dict[str, Any]]  # Sections that failed validation
+    uniqueness_checks: list[dict[str, Any]]  # UniquenessCheck results
+    replanning_feedback: str  # Feedback for replanning
+    preview_validation_scratchpad: list[dict[str, Any]]  # Full iteration history with validation results and feedback
+
+    # === Phase 1.6: Section Selection ===
+    selected_section_ids: list[str]  # IDs of sections user chose to include
+    section_selection_skipped: bool  # True if user skipped selection (include all)
+
+    # === Phase 2: Research ===
+    research_cache: dict[str, dict[str, Any]]  # url_hash -> content
+
+    # === Phase 2.5: Validation ===
+    validated_sources: dict[str, list[dict[str, Any]]]  # section_id -> sources
+
+    # === Phase 3: Writing ===
+    section_drafts: dict[str, str]  # section_id -> markdown
+    section_reviews: dict[str, dict[str, Any]]  # section_id -> critic result
+    fact_check_items: list[str]
+
+    # === Phase 4: Assembly ===
+    combined_draft: str
+    final_review: dict[str, Any]
+    rendered_diagrams: dict[str, str]  # diagram_id -> path
+    final_assembly_scratchpad: list[dict[str, Any]]  # Assembly iteration history with critic scores and fixes
+
+    # === Phase 5: Human Review ===
+    human_review_decision: str  # "approve" | "edit" | "reject"
+    human_feedback: str
+
+    # === Output ===
+    final_markdown: str
+    metadata: dict[str, Any]
+
+    # === Metrics Tracking ===
+    metrics: dict[str, Any]  # {node_name: {duration_s, tokens_in, tokens_out, calls, cost}}
+
+    # === Error Handling ===
+    error_message: str | None
+
+
+# =============================================================================
+# Pydantic Models for LLM Structured Output
+# =============================================================================
+
+
+class DiscoveryQueries(BaseModel):
+    """Output from topic discovery LLM call."""
+
+    queries: list[str] = Field(
+        description="3-5 search queries for topic discovery",
+        min_length=3,
+        max_length=5,
+    )
+
+
+class PlanSection(BaseModel):
+    """A single section in the blog plan."""
+
+    id: str = Field(description="Unique identifier for the section")
+    title: str | None = Field(default=None, description="Section title")
+    role: str = Field(
+        description="Section role: hook, problem, why, implementation, deep_dive, conclusion"
+    )
+    search_queries: list[str] = Field(
+        default_factory=list,
+        description="2-3 specific queries for research",
+    )
+    gap_addressed: str | None = Field(
+        default=None,
+        description="Which content gap this section addresses (gap_type from ContentStrategy)",
+    )
+    gap_justification: str = Field(
+        default="",
+        description="How this section fills the identified gap",
+    )
+    needs_code: bool = Field(default=False, description="Whether section needs code examples")
+    needs_diagram: bool = Field(
+        default=False,
+        description="Whether section needs a diagram",
+    )
+    target_words: int = Field(default=200, description="Target word count")
+    optional: bool = Field(
+        default=False,
+        description="If true, this is an extra topic the user can choose to include or skip",
+    )
+
+
+class BlogPlan(BaseModel):
+    """Complete blog plan from planning phase."""
+
+    blog_title: str = Field(description="The blog post title")
+    target_words: int = Field(description="Total target word count")
+    sections: list[PlanSection] = Field(description="List of sections in order")
+
+
+class CriticScore(BaseModel):
+    """8 scoring dimensions (1-10 scale)."""
+
+    technical_accuracy: int = Field(ge=1, le=10, description="Technical correctness")
+    completeness: int = Field(ge=1, le=10, description="Coverage of topic")
+    code_quality: int = Field(ge=1, le=10, description="Quality of code examples")
+    clarity: int = Field(ge=1, le=10, description="Ease of understanding")
+    voice: int = Field(ge=1, le=10, description="Consistent author voice")
+    originality: int = Field(ge=1, le=10, description="Not copied from sources")
+    length: int = Field(ge=1, le=10, description="Appropriate word count")
+    diagram_quality: int = Field(ge=1, le=10, default=10, description="Diagram quality (10 if no diagrams)")
+
+
+class CriticIssue(BaseModel):
+    """A single issue identified by the critic."""
+
+    dimension: str = Field(description="Which dimension failed: technical_accuracy, completeness, etc.")
+    location: str = Field(description="Where in the section: 'paragraph 2', 'code block 1', 'diagram'")
+    problem: str = Field(description="What's wrong")
+    suggestion: str = Field(description="How to fix it")
+    needs_research: bool = Field(default=False, description="True if missing info requires web search")
+    suggested_queries: list[str] = Field(
+        default_factory=list,
+        description="2 search queries to find missing information"
+    )
+
+
+class SectionCriticResult(BaseModel):
+    """Full critic evaluation of a section."""
+
+    scores: CriticScore
+    overall_pass: bool = Field(description="Whether section passes quality gate (avg >= 8)")
+    issues: list[CriticIssue] = Field(default_factory=list, description="Specific issues found")
+    fact_check_needed: list[str] = Field(
+        default_factory=list,
+        description="Claims that need verification",
+    )
+
+
+# =============================================================================
+# Final Critic Models (Slice 6.7)
+# =============================================================================
+
+
+class FinalCriticScore(BaseModel):
+    """7 whole-blog dimensions (1-10 scale)."""
+
+    coherence: int = Field(ge=1, le=10, description="Sections flow logically, ideas connect")
+    voice_consistency: int = Field(
+        ge=1, le=10, description="Same author voice throughout"
+    )
+    no_redundancy: int = Field(
+        ge=1, le=10, description="No repeated information across sections"
+    )
+    narrative_arc: int = Field(
+        ge=1, le=10, description="Clear beginning, middle, end progression"
+    )
+    hook_effectiveness: int = Field(ge=1, le=10, description="Opening captures attention")
+    conclusion_strength: int = Field(
+        ge=1, le=10, description="Ending provides clear takeaways"
+    )
+    overall_polish: int = Field(
+        ge=1, le=10, description="Professional quality, no rough edges"
+    )
+
+
+class TransitionFix(BaseModel):
+    """Fix needed between sections."""
+
+    between: list[str] = Field(description="Two section IDs where transition is weak")
+    issue: str = Field(description="What's wrong with the transition")
+    suggestion: str = Field(description="How to fix it")
+
+
+class FinalCriticResult(BaseModel):
+    """Full final critic evaluation."""
+
+    scores: FinalCriticScore
+    overall_pass: bool = Field(description="True if average of all scores >= 8")
+    transition_fixes: list[TransitionFix] = Field(default_factory=list)
+    praise: str = Field(default="", description="What's working well")
+    issues: list[str] = Field(default_factory=list, description="General issues to address")
+    reading_time_minutes: int = Field(ge=1, description="Estimated reading time")
+    word_count: int = Field(ge=0, description="Total word count")
+
+
+class SourceValidation(BaseModel):
+    """Validation result for a single source."""
+
+    url: str = Field(description="Source URL")
+    relevant: bool = Field(description="Is source relevant to section")
+    quality: str = Field(description="Quality rating: high, medium, low")
+    use: bool = Field(description="Whether to use this source")
+    reason: str = Field(description="Reason for decision")
+
+
+class SourceValidationList(BaseModel):
+    """List of source validations for a section."""
+
+    sources: list[SourceValidation] = Field(description="Validation results")
+
+
+class AlternativeQueries(BaseModel):
+    """Alternative search queries for retry when sources are insufficient."""
+
+    queries: list[str] = Field(
+        min_length=2,
+        max_length=3,
+        description="2-3 alternative search queries different from the originals",
+    )
+
+
+# =============================================================================
+# Content Landscape Analysis Models (Slice 0.4)
+# =============================================================================
+
+
+class ContentGap(BaseModel):
+    """Identified gap in existing content."""
+
+    gap_type: str = Field(
+        description="Type of gap: missing_topic | insufficient_depth | no_examples | missing_edge_cases"
+    )
+    description: str = Field(description="What's missing in existing articles")
+    opportunity: str = Field(description="How we'll fill this gap uniquely")
+
+
+class ExistingArticleSummary(BaseModel):
+    """Summary of one analyzed article."""
+
+    url: str = Field(description="Article URL")
+    title: str = Field(description="Article title")
+    main_angle: str = Field(description="What angle does this article take?")
+    strengths: list[str] = Field(description="What it does well (2-3 points)")
+    weaknesses: list[str] = Field(description="What's missing or weak (2-3 points)")
+    key_points_covered: list[str] = Field(description="Main points covered (3-5 bullets)")
+
+
+class ContentStrategy(BaseModel):
+    """Strategy for differentiated blog content."""
+
+    unique_angle: str = Field(
+        description="Our differentiated perspective (e.g., 'focus on production pitfalls', 'emphasize cost optimization')"
+    )
+    target_persona: str = Field(
+        description="Primary reader type: junior_engineer | senior_architect | data_scientist | devops_engineer"
+    )
+    reader_problem: str = Field(
+        description="Specific problem they're solving (e.g., 'reduce LLM API costs by 50%')"
+    )
+    gaps_to_fill: list[ContentGap] = Field(
+        min_length=1,
+        max_length=5,
+        description="Top 3-5 content gaps we'll address",
+    )
+    existing_content_summary: str = Field(
+        description="1-2 sentence summary of what top articles already cover well"
+    )
+    analyzed_articles: list[ExistingArticleSummary] = Field(
+        min_length=3,
+        max_length=10,
+        description="5-10 top articles analyzed",
+    )
+    differentiation_requirements: list[str] = Field(
+        description="Specific requirements to ensure uniqueness (e.g., 'must include benchmarks')"
+    )
+
+
+# =============================================================================
+# Preview Validation Models (Phase 1.5)
+# =============================================================================
+
+
+class SectionFeasibilityScore(BaseModel):
+    """Feasibility assessment for a planned section."""
+
+    section_id: str = Field(description="Section identifier")
+    sample_queries_tested: list[str] = Field(
+        description="1-2 queries actually executed for this section"
+    )
+    sources_found: int = Field(description="Number of sources found")
+    snippet_quality: str = Field(
+        description="Quality assessment: excellent | good | weak | poor"
+    )
+    information_availability: int = Field(
+        ge=0, le=100, description="Score 0-100 indicating information availability"
+    )
+    is_feasible: bool = Field(
+        description="True if score >= 60 (passing threshold)"
+    )
+    concerns: list[str] = Field(
+        default_factory=list, description="Issues if score < 60"
+    )
+
+
+class PreviewValidationResult(BaseModel):
+    """Results from preview validation phase."""
+
+    section_scores: list[SectionFeasibilityScore] = Field(
+        description="Feasibility scores for all sections"
+    )
+    weak_sections: list[str] = Field(
+        default_factory=list, description="Section IDs with score < 60"
+    )
+    all_sections_pass: bool = Field(description="True if all sections are feasible")
+    recommendation: str = Field(
+        description="proceed | revise_weak_sections | regenerate_plan"
+    )
+    feedback_for_replanning: str = Field(
+        default="", description="Feedback to guide replanning if needed"
+    )
+
+
+class UniquenessCheck(BaseModel):
+    """Uniqueness verification against analyzed articles."""
+
+    section_id: str = Field(description="Section identifier")
+    section_title: str = Field(description="Section title")
+    overlap_percentage: float = Field(
+        ge=0.0, le=100.0, description="Overlap percentage 0-100"
+    )
+    overlapping_articles: list[str] = Field(
+        default_factory=list, description="URLs with high overlap"
+    )
+    is_unique: bool = Field(description="True if overlap <= 70%")
+    concerns: str = Field(default="", description="What content is being rehashed")
+
+
+class UniquenessAnalysisResult(BaseModel):
+    """LLM-generated uniqueness analysis for all sections."""
+
+    uniqueness_checks: list[UniquenessCheck] = Field(
+        description="Uniqueness check for each section"
+    )
+    overall_assessment: str = Field(
+        description="Summary of uniqueness issues across all sections"
+    )
+
+
+class SectionSuggestion(BaseModel):
+    """Concrete suggestion for improving a rejected section."""
+
+    section_id: str = Field(description="Section ID that was rejected")
+    issue: str = Field(description="Why this section was rejected")
+    suggested_title: str = Field(description="Alternative section title")
+    suggested_angle: str = Field(description="Different approach to take")
+    alternative_gap: str | None = Field(
+        default=None,
+        description="Different gap to address (optional)",
+    )
+
+
+class ReplanningFeedback(BaseModel):
+    """LLM-generated replanning feedback with concrete suggestions."""
+
+    summary: str = Field(description="High-level summary of all issues")
+    section_suggestions: list[SectionSuggestion] = Field(
+        description="Concrete suggestions for each rejected section"
+    )
+    general_guidance: str = Field(description="Overall advice for replanning")
+
+
+# =============================================================================
+# JobManager - Checkpoint/Resume
+# =============================================================================
+
+
+class JobManager:
+    """
+    Manages blog agent jobs with checkpoint/resume functionality.
+
+    Directory structure:
+    ~/.blog_agent/
+    └── jobs/
+        └── {job_id}/              # e.g., "semantic-caching-for-llm"
+            ├── state.json         # Current phase, progress
+            ├── input.json         # Original title + context
+            ├── plan.json          # Blog outline
+            ├── research/
+            │   └── cache/         # Fetched articles
+            ├── drafts/
+            │   └── sections/      # Individual section drafts
+            └── images/            # Rendered diagrams
+
+    Example:
+        manager = JobManager()
+
+        # Create new job
+        job_id = manager.create_job(
+            title="Semantic Caching for LLM Applications",
+            context="Saw GPTCache on Twitter..."
+        )
+        # Returns: "semantic-caching-for-llm-applications"
+
+        # Save state during execution
+        manager.save_state(job_id, state)
+
+        # Resume later
+        state = manager.load_state(job_id)
+    """
+
+    BASE_DIR = Path.home() / ".blog_agent"
+
+    def __init__(self, base_dir: Path | None = None):
+        """
+        Initialize JobManager.
+
+        Args:
+            base_dir: Override base directory (for testing)
+        """
+        if base_dir is not None:
+            self.BASE_DIR = base_dir
+        self._ensure_base_dirs()
+
+    def _ensure_base_dirs(self) -> None:
+        """Ensure base directories exist."""
+        (self.BASE_DIR / "jobs").mkdir(parents=True, exist_ok=True)
+
+    def create_job(
+        self,
+        title: str,
+        context: str,
+        target_length: str = "medium",
+        flags: dict[str, bool] | None = None,
+    ) -> str:
+        """
+        Create a new job and return its ID.
+
+        Args:
+            title: Blog title
+            context: Context/notes for the blog
+            target_length: "short", "medium", or "long"
+            flags: Optional flags dict
+
+        Returns:
+            Job ID (slugified title)
+        """
+        job_id = self.slugify(title)
+        job_dir = self.get_job_dir(job_id)
+
+        # Create directory structure
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "research" / "cache").mkdir(parents=True, exist_ok=True)
+        (job_dir / "drafts" / "sections").mkdir(parents=True, exist_ok=True)
+        (job_dir / "images").mkdir(exist_ok=True)
+
+        # Save input
+        input_data = {
+            "title": title,
+            "context": context,
+            "target_length": target_length,
+            "flags": flags or {},
+            "created_at": datetime.now().isoformat(),
+        }
+        self._save_json(job_dir / "input.json", input_data)
+
+        # Initialize state
+        state_data = {
+            "current_phase": Phase.TOPIC_DISCOVERY.value,
+            "current_section_index": 0,
+            "can_resume": True,
+            "last_updated": datetime.now().isoformat(),
+        }
+        self._save_json(job_dir / "state.json", state_data)
+
+        return job_id
+
+    def save_state(self, job_id: str, state: BlogAgentState) -> None:
+        """
+        Save current state to disk.
+
+        Saves:
+        - state.json: phase, section_index, can_resume
+        - plan.json: if plan exists
+        - research/cache.json: fetched research content (if present)
+        - drafts/sections/{id}.md: each section draft
+        """
+        job_dir = self.get_job_dir(job_id)
+        if not job_dir.exists():
+            raise ValueError(f"Job not found: {job_id}")
+
+        # Save main state
+        state_data = {
+            "current_phase": state.get("current_phase", Phase.TOPIC_DISCOVERY.value),
+            "current_section_index": state.get("current_section_index", 0),
+            "can_resume": True,
+            "last_updated": datetime.now().isoformat(),
+        }
+        self._save_json(job_dir / "state.json", state_data)
+
+        # Save topic context
+        if state.get("topic_context"):
+            self._save_json(
+                job_dir / "topic_context.json",
+                {
+                    "queries_used": state.get("discovery_queries", []),
+                    "results": state.get("topic_context", []),
+                },
+            )
+
+        # Save plan
+        if state.get("plan"):
+            self._save_json(job_dir / "plan.json", state["plan"])
+
+        # Save section drafts
+        for section_id, content in state.get("section_drafts", {}).items():
+            draft_path = job_dir / "drafts" / "sections" / f"{section_id}.md"
+            draft_path.write_text(content)
+
+        # Save section reviews
+        for section_id, review in state.get("section_reviews", {}).items():
+            review_path = job_dir / "feedback" / f"section_{section_id}_critic.json"
+            review_path.parent.mkdir(exist_ok=True)
+            self._save_json(review_path, review)
+
+        # Save combined draft
+        if state.get("combined_draft"):
+            (job_dir / "drafts" / "v1.md").write_text(state["combined_draft"])
+
+        # Save final
+        if state.get("final_markdown"):
+            (job_dir / "final.md").write_text(state["final_markdown"])
+
+        # Save metadata
+        if state.get("metadata"):
+            self._save_json(job_dir / "metadata.json", state["metadata"])
+
+        # Save research_cache
+        if state.get("research_cache"):
+            cache_file = job_dir / "research" / "cache.json"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            self._save_json(cache_file, state["research_cache"])
+
+    def load_state(self, job_id: str) -> BlogAgentState | None:
+        """
+        Load state from disk for resume.
+
+        Returns:
+            BlogAgentState if job exists, None otherwise
+        """
+        job_dir = self.get_job_dir(job_id)
+
+        if not (job_dir / "state.json").exists():
+            return None
+
+        state: BlogAgentState = {}
+
+        # Load main state
+        main_state = self._load_json(job_dir / "state.json")
+        state["current_phase"] = main_state.get("current_phase")
+        state["current_section_index"] = main_state.get("current_section_index", 0)
+        state["job_id"] = job_id
+
+        # Load input
+        if (job_dir / "input.json").exists():
+            input_data = self._load_json(job_dir / "input.json")
+            state["title"] = input_data.get("title", "")
+            state["context"] = input_data.get("context", "")
+            state["target_length"] = input_data.get("target_length", "medium")
+            state["flags"] = input_data.get("flags", {})
+
+        # Load topic context
+        if (job_dir / "topic_context.json").exists():
+            tc = self._load_json(job_dir / "topic_context.json")
+            state["discovery_queries"] = tc.get("queries_used", [])
+            state["topic_context"] = tc.get("results", [])
+
+        # Load content strategy
+        if (job_dir / "content_strategy.json").exists():
+            state["content_strategy"] = self._load_json(job_dir / "content_strategy.json")
+
+        # Load plan
+        if (job_dir / "plan.json").exists():
+            state["plan"] = self._load_json(job_dir / "plan.json")
+
+        # Load section drafts
+        drafts_dir = job_dir / "drafts" / "sections"
+        if drafts_dir.exists():
+            state["section_drafts"] = {}
+            for draft_file in drafts_dir.glob("*.md"):
+                section_id = draft_file.stem
+                state["section_drafts"][section_id] = draft_file.read_text()
+
+        # Load section reviews
+        feedback_dir = job_dir / "feedback"
+        if feedback_dir.exists():
+            state["section_reviews"] = {}
+            for review_file in feedback_dir.glob("section_*_critic.json"):
+                # Extract section_id from filename
+                match = re.search(r"section_(.+)_critic\.json", review_file.name)
+                if match:
+                    section_id = match.group(1)
+                    state["section_reviews"][section_id] = self._load_json(review_file)
+
+        # Load combined draft
+        if (job_dir / "drafts" / "v1.md").exists():
+            state["combined_draft"] = (job_dir / "drafts" / "v1.md").read_text()
+
+        # Load final
+        if (job_dir / "final.md").exists():
+            state["final_markdown"] = (job_dir / "final.md").read_text()
+
+        # Load research_cache
+        cache_file = job_dir / "research" / "cache.json"
+        if cache_file.exists():
+            state["research_cache"] = self._load_json(cache_file)
+
+        return state
+
+    def list_jobs(self, status: str | None = None) -> list[dict[str, Any]]:
+        """
+        List all jobs with optional status filter.
+
+        Args:
+            status: Filter by "complete" or "incomplete"
+
+        Returns:
+            List of job info dicts
+        """
+        jobs = []
+        jobs_dir = self.BASE_DIR / "jobs"
+
+        if not jobs_dir.exists():
+            return []
+
+        for job_dir in jobs_dir.iterdir():
+            if not job_dir.is_dir():
+                continue
+
+            state_file = job_dir / "state.json"
+            if not state_file.exists():
+                continue
+
+            state = self._load_json(state_file)
+            input_file = job_dir / "input.json"
+            input_data = self._load_json(input_file) if input_file.exists() else {}
+
+            is_complete = state.get("current_phase") == Phase.DONE.value
+
+            job_info = {
+                "job_id": job_dir.name,
+                "title": input_data.get("title", ""),
+                "phase": state.get("current_phase"),
+                "last_updated": state.get("last_updated"),
+                "complete": is_complete,
+            }
+
+            if status is None:
+                jobs.append(job_info)
+            elif status == "complete" and is_complete:
+                jobs.append(job_info)
+            elif status == "incomplete" and not is_complete:
+                jobs.append(job_info)
+
+        return sorted(jobs, key=lambda x: x.get("last_updated") or "", reverse=True)
+
+    def get_job_dir(self, job_id: str) -> Path:
+        """Get path to job directory."""
+        return self.BASE_DIR / "jobs" / job_id
+
+    @staticmethod
+    def slugify(text: str, max_length: int = 50) -> str:
+        """
+        Convert text to URL-friendly slug.
+
+        Args:
+            text: Text to slugify
+            max_length: Maximum slug length
+
+        Returns:
+            Slugified string
+
+        Example:
+            >>> JobManager.slugify("Semantic Caching for LLM Apps!")
+            "semantic-caching-for-llm-apps"
+        """
+        # Convert to lowercase
+        text = text.lower()
+        # Replace special characters with hyphens
+        text = re.sub(r"[^a-z0-9]+", "-", text)
+        # Remove leading/trailing hyphens
+        text = text.strip("-")
+        # Truncate
+        if len(text) > max_length:
+            text = text[:max_length].rstrip("-")
+        return text
+
+    def _save_json(self, path: Path, data: dict[str, Any]) -> None:
+        """Save data as JSON."""
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+
+    def _load_json(self, path: Path) -> dict[str, Any]:
+        """Load JSON data."""
+        with open(path) as f:
+            return json.load(f)

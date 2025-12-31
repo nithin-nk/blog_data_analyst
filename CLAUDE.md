@@ -1,0 +1,184 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Working Guidelines
+
+1. **Think like a professional developer** - Understand the problem thoroughly, evaluate all available options, and present options to the designer/owner of this application before implementing.
+
+2. **Don't assume anything** - Analyze the existing code and ask clarifying questions with your recommendations. When uncertain, ask rather than guess.
+
+3. **Always test your code** - Write unit tests and integration tests for all new functionality. No code is complete without tests.
+
+4. **Do the right thing** - No shortcuts. Follow best practices, write clean code, and maintain the established patterns in the codebase.
+
+5. **Keep plans concise** - Plans should be short and to the point. No fluff. Skip code details and use bulleted points to explain how each task will be accomplished.
+
+6. **Refer to design.md for implementation plans** - Always consult design.md to get a complete understanding of the design before creating or updating implementation plans.
+
+7. **Mark completed implementation plans** - Update IMPLEMENTATION_PLAN.md to mark tasks/phases as completed when they are done.
+
+8. **Test comprehensively** - Write unit tests (fully mocked) and integration tests (mocked LLM outputs with real tools like web search/fetching). Integration tests should use mocked LLM responses to avoid API quota issues and ensure deterministic testing.
+
+9. **Add pip packages to pyproject.toml** - When installing a new pip package, always add it to pyproject.toml under `[project.dependencies]` to keep dependencies tracked and reproducible.
+
+10. **Read all planning documents before any planning work** - When planning any feature, phase, or significant implementation work, you MUST read:
+   - VERTICAL_SLICE_PLAN.md (vertical slice strategy and current status)
+   - IMPLEMENTATION_PLAN.md (overall implementation phases and modules)
+   - design.md (complete architecture specification)
+
+   After reading these documents, think thoroughly about the implementation approach. Ensure no detail is missed from these documents when creating your plan.
+
+## Project Overview
+
+Blog Agent - An AI-powered technical blog writer that generates publication-ready markdown from a title and context. Uses Python + LangGraph with Google Gemini (Flash/Flash-Lite models).
+
+## Environment Setup
+
+**IMPORTANT:** This project uses a Python virtual environment. All commands must be run with the venv activated or using the venv Python directly.
+
+```bash
+# Create virtual environment (first time only)
+python -m venv .venv
+
+# Activate virtual environment
+source .venv/bin/activate
+
+# Install dependencies (after activation)
+pip install langgraph duckduckgo-search trafilatura httpx rich click python-dotenv langchain-google-genai pydantic
+
+# Or install from pyproject.toml if available
+pip install -e .
+```
+
+The virtual environment is located at `.venv/` in the project root.
+
+## Commands
+
+**All commands below assume the virtual environment is activated, or prefix with `.venv/bin/`**
+
+```bash
+# Run the agent
+python -m src.agent start --title "Topic Title" --context "Notes and context" --length medium
+
+# Resume interrupted job
+python -m src.agent resume <job_id>
+
+# List jobs
+python -m src.agent jobs [--status complete|incomplete]
+
+# Run tests (use PYTHONPATH=. to ensure src module is found)
+PYTHONPATH=. pytest tests/unit/                    # Fast unit tests (mocked)
+PYTHONPATH=. pytest tests/unit/ -n auto            # Run tests in parallel using all CPU cores
+PYTHONPATH=. pytest tests/integration/             # Integration tests (needs API keys)
+PYTHONPATH=. pytest tests/unit/test_tools.py -v    # Single test file
+PYTHONPATH=. pytest -k "test_search"               # Run tests matching pattern
+
+# Alternative: run tests using venv directly without activation
+PYTHONPATH=. .venv/bin/pytest tests/unit/
+PYTHONPATH=. .venv/bin/pytest tests/unit/ -n auto  # Parallel execution
+```
+
+## Testing Strategy
+
+### Unit Tests (`tests/unit/`)
+- **Fully mocked** - All external dependencies (LLM, web requests) are mocked
+- **Fast execution** - Run in < 5 seconds total
+- **Deterministic** - Same input always produces same output
+- **No API keys required** - Can run offline
+
+### Integration Tests (`tests/integration/`)
+- **Mocked LLM responses** - Use `unittest.mock` to return predefined LLM outputs
+- **Real tools** - Web search (DuckDuckGo) and content fetching run against real URLs
+- **Avoid API quota** - Mock LLM calls to prevent hitting free tier limits (20 requests/day per project)
+- **Test flows** - Verify node transitions, state updates, and error handling
+
+**Example mocked integration test pattern:**
+```python
+@pytest.mark.asyncio
+async def test_validation_with_mocked_llm():
+    with patch("src.agent.nodes.ChatGoogleGenerativeAI") as mock_llm_class:
+        mock_llm = MagicMock()
+        mock_structured = MagicMock()
+        mock_structured.invoke.return_value = SourceValidationList(sources=[...])
+        mock_llm.with_structured_output.return_value = mock_structured
+        mock_llm_class.return_value = mock_llm
+
+        # Test runs with mocked LLM, real web fetching
+        result = await validate_sources_node(state)
+```
+
+## Architecture
+
+### LangGraph State Machine
+
+The agent is a LangGraph StateGraph with 7 nodes connected in a pipeline:
+
+```
+topic_discovery → planning → research → validate_sources → write_section → final_assembly → human_review
+                                                              ↑______|  (loops per section)
+```
+
+**Conditional Routing:**
+- `write_section` loops back to itself until all sections complete
+- `human_review` can route back to `final_assembly` for edits
+
+### Pipeline Phases
+
+| Phase | Node | Model | Purpose |
+|-------|------|-------|---------|
+| 0.5 | `topic_discovery` | Flash-Lite | Generate search queries, gather web context |
+| 1 | `planning` | Flash-Lite | Create blog outline with sections |
+| 2 | `research` | - | Fetch content from URLs via trafilatura |
+| 2.5 | `validate_sources` | Flash-Lite | Filter sources by quality/relevance |
+| 3 | `write_section` | Flash | Write, critique, refine each section (loop) |
+| 4 | `final_assembly` | Flash | Combine sections, render diagrams, add citations |
+| 5 | `human_review` | - | Interactive approval via terminal UI |
+
+### Module Structure (src/agent/)
+
+- **state.py** - `BlogAgentState` TypedDict, Pydantic models for LLM outputs, `Phase` enum
+- **graph.py** - LangGraph StateGraph definition, `build_blog_agent_graph()`, routing functions
+- **nodes.py** - Node implementations: `topic_discovery_node`, `planning_node`, `write_section_node`, etc.
+- **tools.py** - Utilities: `search_duckduckgo`, `fetch_url_content`, `check_originality`, `render_mermaid`, KeyManager
+- **ui.py** - Rich terminal UI, CLI commands, human review interface
+
+### State Flow
+
+State is a TypedDict that flows through all nodes. Key fields:
+- `job_id` - Slugified topic name (e.g., "semantic-caching-for-llm-applications")
+- `current_phase` - Phase enum value
+- `plan` - Blog outline with sections
+- `section_drafts` - Dict of section_id → markdown content
+- `validated_sources` - Dict of section_id → list of source objects
+
+### Checkpointing
+
+Jobs persist to `~/.blog_agent/jobs/{job_id}/` with:
+- `state.json` - Current phase and progress
+- `plan.json` - Blog outline
+- `drafts/sections/` - Individual section drafts
+- `images/` - Rendered mermaid diagrams
+
+## API Keys
+
+Uses up to 5 Google Gemini API keys for quota management. Create `.env`:
+
+```env
+GOOGLE_API_KEY_1=...
+GOOGLE_API_KEY_2=...
+GOOGLE_API_KEY_3=...
+GOOGLE_API_KEY_4=...
+GOOGLE_API_KEY_5=...
+```
+
+**Key Management:**
+- KeyManager rotates keys on 429 (RESOURCE_EXHAUSTED) errors and tracks usage per key
+- **Free tier limits:** 20 requests/day per model per project for `gemini-2.5-flash-lite`
+- **Best practice:** Use keys from different Google Cloud projects (even under same account) to multiply quota
+- Keys are marked as rate-limited when quota exceeded and automatically reset daily
+
+## Key Design Documents
+
+- **design.md** - Full architecture spec with prompts, state machine, terminal UI mockups
+- **IMPLEMENTATION_PLAN.md** - Incremental build phases with test strategy
