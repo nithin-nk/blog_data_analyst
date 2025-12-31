@@ -489,7 +489,7 @@ source .venv/bin/activate  # On macOS/Linux
 
 ## License
 
-MIT License - See LICENSE file for details
+MIT License
 
 ## Acknowledgments
 
